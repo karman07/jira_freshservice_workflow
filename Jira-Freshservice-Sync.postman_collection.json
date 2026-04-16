@@ -1,0 +1,155 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		"name": "Jira-Freshservice Integration",
+		"description": "Endpoints and sample payloads for testing the bi-directional sync Between Jira and Freshservice.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Jira Webhooks",
+			"item": [
+				{
+					"name": "Jira: Issue Created",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"webhookEvent\": \"jira:issue_created\",\n    \"issue\": {\n        \"id\": \"10001\",\n        \"key\": \"PROJ-1\",\n        \"fields\": {\n            \"summary\": \"Test Issue from Postman\",\n            \"description\": \"This is a detailed description of the issue.\",\n            \"priority\": {\n                \"name\": \"High\"\n            },\n            \"status\": {\n                \"name\": \"To Do\"\n            }\n        }\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{BASE_URL}}/webhook/jira",
+							"host": [
+								"{{BASE_URL}}"
+							],
+							"path": [
+								"webhook",
+								"jira"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Jira: Comment Created",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"webhookEvent\": \"comment_created\",\n    \"issue\": {\n        \"id\": \"10001\",\n        \"key\": \"PROJ-1\"\n    },\n    \"comment\": {\n        \"id\": \"10101\",\n        \"body\": \"This is a test comment from Jira.\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{BASE_URL}}/webhook/jira",
+							"host": [
+								"{{BASE_URL}}"
+							],
+							"path": [
+								"webhook",
+								"jira"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Freshservice Webhooks",
+			"item": [
+				{
+					"name": "FS: Ticket Created",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"ticket_created\",\n    \"ticket\": {\n        \"id\": 12345,\n        \"subject\": \"Issue from Freshservice\",\n        \"description\": \"I am having trouble with my laptop.\",\n        \"priority\": 2,\n        \"status\": 2\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{BASE_URL}}/webhook/freshservice",
+							"host": [
+								"{{BASE_URL}}"
+							],
+							"path": [
+								"webhook",
+								"freshservice"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "FS: Note Created",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"note_created\",\n    \"ticket\": {\n        \"id\": 12345\n    },\n    \"note\": {\n        \"id\": 98765,\n        \"body\": \"Checking in on this ticket.\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{BASE_URL}}/webhook/freshservice",
+							"host": [
+								"{{BASE_URL}}"
+							],
+							"path": [
+								"webhook",
+								"freshservice"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "BASE_URL",
+			"value": "http://localhost:3000/api",
+			"type": "string"
+		}
+	]
+}
