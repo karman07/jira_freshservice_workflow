@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { WebhookController } from './webhook.controller';
 import { SyncModule } from '../sync/sync.module';
+import { FreshserviceModule } from '../freshservice/freshservice.module';
 
 /**
  * WebhookModule
@@ -14,7 +15,7 @@ import { SyncModule } from '../sync/sync.module';
  *   - Does NOT contain any business logic — purely a routing layer
  */
 @Module({
-  imports: [SyncModule], // Need SyncService to handle events
+  imports: [SyncModule, FreshserviceModule], // Need SyncService and FreshserviceService
   controllers: [WebhookController],
 })
 export class WebhookModule {}
