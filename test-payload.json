@@ -1,0 +1,4 @@
+{
+  "event_type": "ticket_created",
+  "ticket": { "id": 12345, "subject": "Test Payload" }
+}

@@ -1,21 +1,19 @@
 import { Module } from '@nestjs/common';
 import { WebhookController } from './webhook.controller';
 import { SyncModule } from '../sync/sync.module';
-import { FreshserviceModule } from '../freshservice/freshservice.module';
 
 /**
  * WebhookModule
  * ─────────────
- * Responsibility:
- *   - Expose HTTP endpoints for incoming webhook events:
- *       POST /api/webhook/jira           ← receives events from Jira
- *       POST /api/webhook/freshservice   ← receives events from Freshservice
- *   - Parse and validate incoming payloads using DTOs
- *   - Delegate processing to SyncService (via SyncModule)
- *   - Does NOT contain any business logic — purely a routing layer
+ * Exposes:
+ *   POST /api/webhook/jira           ← Jira automation webhook
+ *   POST /api/webhook/freshservice   ← Freshservice automation webhook
+ *
+ * All business logic is delegated to SyncService (via SyncModule).
+ * WebhookController is purely a routing + logging layer.
  */
 @Module({
-  imports: [SyncModule, FreshserviceModule], // Need SyncService and FreshserviceService
+  imports: [SyncModule], // SyncModule exports SyncService
   controllers: [WebhookController],
 })
 export class WebhookModule {}

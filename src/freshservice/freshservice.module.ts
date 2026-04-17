@@ -1,26 +1,21 @@
 import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { FreshserviceService } from './freshservice.service';
+import { FreshserviceClassifierService } from './freshservice-classifier.service';
 
 /**
  * FreshserviceModule
  * ──────────────────
- * Responsibility:
- *   - Encapsulate ALL outbound communication with the Freshservice REST API
- *   - Provide FreshserviceService to other modules (specifically SyncModule)
- *   - Uses HttpModule (Axios under the hood) for HTTP calls
- *   - Reads credentials from ConfigService (FRESHSERVICE_BASE_URL, FRESHSERVICE_API_KEY)
+ * Encapsulates ALL outbound Freshservice REST API calls
+ * and the incoming webhook classification logic.
  *
- * Exposes:
- *   - createTicket()  → Called when a Jira issue is created
- *   - updateTicket()  → Called when a Jira issue is updated
- *   - addNote()       → Called when a Jira comment is added
+ * Provides & Exports:
+ *   FreshserviceService           → HTTP calls to Freshservice API
+ *   FreshserviceClassifierService → Smart event classification + note hashing
  */
 @Module({
-  imports: [
-    HttpModule, // Provides HttpService (Axios wrapper) for API calls
-  ],
-  providers: [FreshserviceService],
-  exports: [FreshserviceService], // Export so SyncModule can inject it
+  imports: [HttpModule],
+  providers: [FreshserviceService, FreshserviceClassifierService],
+  exports: [FreshserviceService, FreshserviceClassifierService],
 })
 export class FreshserviceModule {}

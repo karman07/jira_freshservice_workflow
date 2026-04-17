@@ -1,0 +1,234 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		"name": "Jira-Freshservice Bi-Directional Sync",
+		"description": "Production-grade collection for testing the full Jira <-> Freshservice bi-directional webhook sync.\n\nSet ONE collection variable:\n  base_url = http://localhost:3000/api\n\nAll credentials are loaded from your server's .env file — zero secrets stored here.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:3000/api",
+			"type": "string",
+			"description": "Change to your ngrok / production URL for live testing."
+		}
+	],
+	"item": [
+		{
+			"name": "🟢 Health",
+			"item": [
+				{
+					"name": "GET / Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+						"description": "Confirms the server is up. Returns 'Hello World!'."
+					}
+				}
+			]
+		},
+		{
+			"name": "🔵 Jira → Freshservice",
+			"item": [
+				{
+					"name": "Issue Created",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"jira:issue_created\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\",\n    \"fields\": {\n      \"summary\": \"Login page throws 500 error\",\n      \"description\": \"Users are unable to log in. The server returns a 500 Internal Server Error.\",\n      \"priority\": { \"name\": \"High\" },\n      \"status\":   { \"name\": \"To Do\" },\n      \"reporter\": { \"emailAddress\": \"reporter@example.com\" }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "Fires 'jira:issue_created'. Creates a Freshservice ticket.\nPriority High → FS 3 | Status To Do → FS 2 (Open)"
+					}
+				},
+				{
+					"name": "Issue Updated — Status Change",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"jira:issue_updated\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\",\n    \"fields\": {\n      \"summary\": \"Login page throws 500 error\",\n      \"priority\": { \"name\": \"High\" },\n      \"status\":   { \"name\": \"In Progress\" }\n    }\n  },\n  \"changelog\": {\n    \"items\": [\n      { \"field\": \"status\", \"fromString\": \"To Do\", \"toString\": \"In Progress\" }\n    ]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "Status: In Progress → FS status 3 (Pending). Loop prevention active."
+					}
+				},
+				{
+					"name": "Issue Updated — Priority Change",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"jira:issue_updated\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\",\n    \"fields\": {\n      \"summary\": \"Login page throws 500 error\",\n      \"priority\": { \"name\": \"Highest\" },\n      \"status\":   { \"name\": \"In Progress\" }\n    }\n  },\n  \"changelog\": {\n    \"items\": [\n      { \"field\": \"priority\", \"fromString\": \"High\", \"toString\": \"Highest\" }\n    ]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "Priority: Highest → FS priority 4 (Urgent)."
+					}
+				},
+				{
+					"name": "Issue Updated — Summary & Description",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"jira:issue_updated\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\",\n    \"fields\": {\n      \"summary\": \"[UPDATED] Login page — root cause found\",\n      \"description\": \"Root cause: null pointer in AuthController.java line 42.\",\n      \"priority\": { \"name\": \"Highest\" },\n      \"status\":   { \"name\": \"In Progress\" }\n    }\n  },\n  \"changelog\": {\n    \"items\": [\n      { \"field\": \"summary\",     \"fromString\": \"Login page throws 500 error\", \"toString\": \"[UPDATED] Login page — root cause found\" },\n      { \"field\": \"description\", \"fromString\": \"\",                             \"toString\":  \"Root cause: null pointer in AuthController.java line 42.\" }\n    ]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "Summary and description synced to FS ticket subject/description."
+					}
+				},
+				{
+					"name": "Comment Created",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"comment_created\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\"\n  },\n  \"comment\": {\n    \"body\": \"I have reproduced the issue on staging. Stack trace attached separately.\",\n    \"author\": { \"displayName\": \"Alice Developer\" }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "Jira comment → Freshservice public note (HTML with author attribution)."
+					}
+				},
+				{
+					"name": "Attachment Added (Real Binary Transfer)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"webhookEvent\": \"jira:attachment_created\",\n  \"issue\": {\n    \"id\": \"10001\",\n    \"key\": \"SCRUM-1\",\n    \"fields\": {\n      \"attachment\": [\n        {\n          \"filename\": \"screenshot.png\",\n          \"content\":  \"https://karmansingharora01.atlassian.net/rest/api/3/attachment/content/REPLACE_WITH_REAL_ID\"\n        },\n        {\n          \"filename\": \"error-log.txt\",\n          \"content\":  \"https://karmansingharora01.atlassian.net/rest/api/3/attachment/content/REPLACE_WITH_REAL_ID_2\"\n        }\n      ]\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/jira",
+							"host": ["{{base_url}}"], "path": ["webhook", "jira"]
+						},
+						"description": "⚙️ HOW IT WORKS:\n1. Server downloads binary from Jira URL using JIRA_EMAIL + JIRA_API_TOKEN from .env\n2. Re-uploads binary to Freshservice ticket as multipart/form-data note\n3. Falls back to a link-note if download fails\n\n📝 Replace 'content' URLs with real Jira attachment content URLs."
+					}
+				}
+			]
+		},
+		{
+			"name": "🟠 Freshservice → Jira",
+			"item": [
+				{
+					"name": "Ticket Created",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event_type\": \"ticket_created\",\n  \"ticket\": {\n    \"id\": 99001,\n    \"subject\": \"VPN not connecting after update\",\n    \"description_text\": \"After the latest Windows update, users can no longer connect to the corporate VPN.\",\n    \"priority\": 3,\n    \"status\": 2\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "Creates a Jira issue.\nFS priority 3 (High) → Jira 'High'\nFS status 2 (Open) → 'To Do'"
+					}
+				},
+				{
+					"name": "Ticket Updated — Status Change (Resolved)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event_type\": \"ticket_updated\",\n  \"ticket\": {\n    \"id\": 99001,\n    \"subject\": \"VPN not connecting after update\",\n    \"priority\": 3,\n    \"status\": 4\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "Status 4 (Resolved) → transitions Jira to 'Done'.\nDynamic transition lookup — no hardcoded IDs."
+					}
+				},
+				{
+					"name": "Ticket Updated — Priority Change (Urgent)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event_type\": \"ticket_updated\",\n  \"ticket\": {\n    \"id\": 99001,\n    \"subject\": \"VPN not connecting after update\",\n    \"priority\": 4,\n    \"status\": 3\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "Priority 4 (Urgent) → Jira 'Highest'."
+					}
+				},
+				{
+					"name": "Ticket Updated — Note Addition (latest_note)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event_type\": \"ticket_updated\",\n  \"ticket\": {\n    \"id\": 99001,\n    \"latest_note\": {\n      \"body\": \"This is a note synced via ticket_updated.latest_note using the new refactored logic.\",\n      \"agent\": { \"name\": \"Bob Support Agent\" }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "In your refactored setup, notes arrive via ticket_updated with a latest_note object. This test simulates that EXACT workflow."
+					}
+				},
+				{
+					"name": "Attachment Added (Real Binary Transfer)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"event_type\": \"attachment_added\",\n  \"ticket_id\": 99001,\n  \"attachments\": [\n    {\n      \"name\":           \"network-diagnostics.pdf\",\n      \"attachment_url\": \"https://intellinum.freshservice.com/api/v2/tickets/99001/attachments/REPLACE_WITH_REAL_ID\"\n    },\n    {\n      \"name\":           \"event-log.csv\",\n      \"attachment_url\": \"https://intellinum.freshservice.com/api/v2/tickets/99001/attachments/REPLACE_WITH_REAL_ID_2\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "⚙️ HOW IT WORKS:\n1. Server downloads binary from FS URL using FRESHSERVICE_API_KEY from .env\n2. Re-uploads binary to Jira issue via POST /rest/api/3/issue/:key/attachments\n   with X-Atlassian-Token: no-check header\n3. Falls back to ADF comment with download links if upload fails\n\n📝 Replace 'attachment_url' values with real FS attachment URLs."
+					}
+				},
+				{
+					"name": "Legacy / Freshdesk Shape Update",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"freshdesk_webhook\": {\n    \"ticket_id\":       \"99002\",\n    \"ticket_subject\":  \"Printer offline in Building A\",\n    \"ticket_status\":   3,\n    \"ticket_priority\": 2\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/webhook/freshservice",
+							"host": ["{{base_url}}"], "path": ["webhook", "freshservice"]
+						},
+						"description": "Handles the legacy freshdesk_webhook payload shape which often triggers a 'ticket_updated' classification with field changes."
+					}
+				}
+			]
+		}
+	]
+}

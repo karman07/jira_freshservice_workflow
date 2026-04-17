@@ -7,26 +7,25 @@ import { DatabaseModule } from '../database/database.module';
 /**
  * SyncModule
  * ──────────
- * Responsibility:
- *   - CORE orchestration logic of the entire integration
- *   - Imports JiraModule and FreshserviceModule to call their services
- *   - Imports DatabaseModule to access TicketMapping and SyncLog collections
- *   - Contains SyncService which:
- *       → Looks up existing mappings in MongoDB
- *       → Decides CREATE vs UPDATE
- *       → Prevents infinite sync loops (lastUpdatedSource check)
- *       → Transforms fields between Jira and Freshservice formats
- *       → Logs all sync events to sync_logs collection
+ * Core orchestration module for the bi-directional integration.
  *
- * Exports SyncService so WebhookModule can inject it into WebhookController.
+ * Imports:
+ *   JiraModule          → Provides JiraService (outbound Jira API)
+ *   FreshserviceModule  → Provides FreshserviceService (outbound FS API)
+ *   DatabaseModule      → Provides TicketMapping & SyncLog Mongoose models
+ *
+ * The DatabaseModule exports MongooseModule (with forFeature schemas),
+ * so SyncService can use @InjectModel(TicketMapping.name) etc.
+ *
+ * Exports SyncService so WebhookModule's WebhookController can inject it.
  */
 @Module({
   imports: [
-    JiraModule,           // Provides JiraService
-    FreshserviceModule,   // Provides FreshserviceService
-    DatabaseModule,       // Provides TicketMapping & SyncLog models
+    JiraModule,          // → JiraService
+    FreshserviceModule,  // → FreshserviceService
+    DatabaseModule,      // → TicketMappingModel, SyncLogModel
   ],
   providers: [SyncService],
-  exports: [SyncService], // Export so WebhookModule can use it
+  exports: [SyncService],
 })
 export class SyncModule {}
