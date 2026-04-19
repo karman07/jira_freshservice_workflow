@@ -6,16 +6,17 @@ import { WebhookModule } from './webhook/webhook.module';
 import { JiraModule } from './jira/jira.module';
 import { FreshserviceModule } from './freshservice/freshservice.module';
 import { SyncModule } from './sync/sync.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
     // ── Load .env globally across the entire app ──────────────────
     ConfigModule.forRoot({
-      isGlobal: true,        // No need to re-import ConfigModule in child modules
+      isGlobal: true,
       envFilePath: '.env',
     }),
 
-    // ── Connect to MongoDB using MONGODB_URI from .env ────────────
+    // ── Connect to MongoDB ────────────────────────────────────────
     MongooseModule.forRootAsync({
       useFactory: () => ({
         uri: process.env.MONGODB_URI,
@@ -23,11 +24,12 @@ import { SyncModule } from './sync/sync.module';
     }),
 
     // ── Feature Modules ────────────────────────────────────────────
-    DatabaseModule,          // Mongoose schemas (TicketMapping, SyncLog)
-    WebhookModule,           // POST /webhook/jira & POST /webhook/freshservice
+    DatabaseModule,          // Schemas: TicketMapping, SyncLog, Customer, Admin
+    WebhookModule,           // POST /api/webhook/jira/:slug & /freshservice/:slug
     JiraModule,              // Outbound Jira REST API calls
     FreshserviceModule,      // Outbound Freshservice REST API calls
-    SyncModule,              // Core sync orchestration logic
+    SyncModule,              // Core multi-tenant sync orchestration
+    AdminModule,             // Admin auth + customer CRUD + analytics
   ],
 })
 export class AppModule {}

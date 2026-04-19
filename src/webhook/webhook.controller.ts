@@ -7,47 +7,126 @@ import {
   HttpStatus,
   Logger,
   Req,
+  Param,
+  Get,
+  Res,
 } from '@nestjs/common';
 import { SyncService } from '../sync/sync.service';
-import { Request } from 'express';
+import { CustomerConfigService } from '../admin/customer-config.service';
+import { Request, Response } from 'express';
+import * as path from 'path';
+import * as fs from 'fs';
+
 /**
  * WebhookController
  * ─────────────────
  * Receives raw webhook payloads from both Jira and Freshservice.
- * Validates basic shape, extracts event type, then delegates to SyncService.
  *
- * Routes:
- *   POST /api/webhook/jira           ← Jira automation webhook
- *   POST /api/webhook/freshservice   ← Freshservice automation webhook
+ * ALL routes are now per-customer (tenant-scoped) via :customerSlug:
  *
- * Always returns HTTP 200 to the caller (even on sync errors)
- * so neither platform keeps retrying infinitely.
+ *   POST /api/webhook/jira/:customerSlug           ← Jira → per-customer
+ *   POST /api/webhook/freshservice/:customerSlug   ← Freshservice → per-customer
  *
- * Event types handled:
+ * Legacy single-project routes (backward compat):
+ *   POST /api/webhook/jira           ← uses JIRA_PROJECT_KEY from .env
+ *   POST /api/webhook/freshservice   ← uses env credentials
  *
- *  FROM JIRA:
- *   jira:issue_created    → Create Freshservice ticket
- *   jira:issue_updated    → Update FS ticket (status, priority, summary, description)
- *   comment_created       → Add note to FS ticket
- *   comment_updated       → Update note in FS ticket
- *   jira:attachment_created → Add attachment reference note in FS
- *
- *  FROM FRESHSERVICE (via Automation Rule → Webhook):
- *   ticket_created        → Create Jira issue
- *   ticket_updated        → Update Jira issue (priority, status, summary)
- *   note_created          → Add comment in Jira
- *   reply_created         → Add comment in Jira
- *   attachment_added      → Add attachment reference comment in Jira
+ * Always returns HTTP 200 so neither platform retries on transient errors.
  */
 @Controller('webhook')
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);
 
-  constructor(private readonly syncService: SyncService) {}
+  constructor(
+    private readonly syncService: SyncService,
+    private readonly customerConfigService: CustomerConfigService,
+  ) {}
 
   // ─────────────────────────────────────────────────────────────
-  // POST /api/webhook/jira
+  // POST /api/webhook/jira/:customerSlug
   // ─────────────────────────────────────────────────────────────
+  @Post('jira/:customerSlug')
+  @HttpCode(HttpStatus.OK)
+  async handleJiraWebhookForCustomer(
+    @Param('customerSlug') customerSlug: string,
+    @Body() payload: any,
+    @Headers() headers: Record<string, string>,
+  ) {
+    const webhookEvent: string =
+      payload?.webhookEvent ?? payload?.issue_event_type_name ?? 'unknown';
+
+    this.logger.log(
+      `\n${'═'.repeat(60)}\n` +
+      `📥 [JIRA][${customerSlug}] Event: "${webhookEvent}"\n` +
+      `   Issue: ${payload?.issue?.key ?? 'n/a'} — ${payload?.issue?.fields?.summary ?? ''}\n` +
+      `${'═'.repeat(60)}`,
+    );
+
+    if (!payload || !payload.issue) {
+      this.logger.warn(`⚠️  [JIRA][${customerSlug}] Empty or malformed payload — ignoring`);
+      return { received: true, status: 'ignored', reason: 'malformed payload' };
+    }
+
+    try {
+      const customerConfig = await this.customerConfigService.resolveBySlug(customerSlug);
+      const result = await this.syncService.handleJiraEvent(webhookEvent, payload, customerConfig);
+      await this.customerConfigService.recordSyncResult(customerSlug, result.status === 'success');
+      this.logger.log(`📤 [JIRA][${customerSlug}] Done — ${result.status} | ${result.message}`);
+      return { received: true, customer: customerSlug, ...result };
+    } catch (err) {
+      this.logger.error(`❌ [JIRA][${customerSlug}] Error: ${err?.message}`);
+      await this.customerConfigService.recordSyncResult(customerSlug, false).catch(() => {});
+      return { received: true, customer: customerSlug, status: 'error', error: err?.message };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // POST /api/webhook/freshservice/:customerSlug
+  // ─────────────────────────────────────────────────────────────
+  @Post('freshservice/:customerSlug')
+  @HttpCode(HttpStatus.OK)
+  async handleFreshserviceWebhookForCustomer(
+    @Param('customerSlug') customerSlug: string,
+    @Body() payload: any,
+    @Headers() headers: Record<string, string>,
+    @Req() req: Request & { rawBody?: string },
+  ) {
+    this.logger.debug(`\n--- INCOMING RAW PAYLOAD [${customerSlug}] ---\n${req.rawBody}\n---`);
+
+    if (!payload || Object.keys(payload).length === 0) {
+      this.logger.warn(`⚠️  [FS][${customerSlug}] Empty payload — ignoring`);
+      return { received: true, status: 'ignored', reason: 'empty payload' };
+    }
+
+    if (typeof payload === 'object') {
+      payload = this.rescueMalformedPayload(payload, req.rawBody);
+    }
+
+    const rawType     = payload?.event_type ?? '(no event_type)';
+    const rawTicketId = payload?.ticket_id ?? payload?.ticket?.id ?? payload?.freshdesk_webhook?.ticket_id ?? 'n/a';
+    this.logger.log(
+      `\n${'═'.repeat(60)}\n` +
+      `📥 [FS][${customerSlug}] Raw event: "${rawType}" | Ticket: ${rawTicketId}\n` +
+      `${'═'.repeat(60)}`,
+    );
+
+    try {
+      const customerConfig = await this.customerConfigService.resolveBySlug(customerSlug);
+      const result = await this.syncService.handleFreshserviceEvent(payload, customerConfig);
+      await this.customerConfigService.recordSyncResult(customerSlug, result.status === 'success');
+      this.logger.log(`📤 [FS][${customerSlug}] Done — ${result.status} | ${result.message}`);
+      return { received: true, customer: customerSlug, ...result };
+    } catch (err) {
+      this.logger.error(`❌ [FS][${customerSlug}] Error: ${err?.message}`);
+      await this.customerConfigService.recordSyncResult(customerSlug, false).catch(() => {});
+      return { received: true, customer: customerSlug, status: 'error', error: err?.message };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Legacy routes (single-project, uses .env credentials)
+  // ─────────────────────────────────────────────────────────────
+
   @Post('jira')
   @HttpCode(HttpStatus.OK)
   async handleJiraWebhook(
@@ -59,49 +138,27 @@ export class WebhookController {
 
     this.logger.log(
       `\n${'═'.repeat(60)}\n` +
-      `📥 [JIRA → WEBHOOK] Event: "${webhookEvent}"\n` +
+      `📥 [JIRA][legacy] Event: "${webhookEvent}"\n` +
       `   Issue: ${payload?.issue?.key ?? 'n/a'} — ${payload?.issue?.fields?.summary ?? ''}\n` +
-      `   Priority: ${payload?.issue?.fields?.priority?.name ?? 'n/a'}\n` +
-      `   Status:   ${payload?.issue?.fields?.status?.name ?? 'n/a'}\n` +
       `${'═'.repeat(60)}`,
     );
 
     if (!payload || !payload.issue) {
-      this.logger.warn('⚠️  [JIRA WEBHOOK] Empty or malformed payload — ignoring');
+      this.logger.warn('⚠️  [JIRA][legacy] Empty or malformed payload — ignoring');
       return { received: true, status: 'ignored', reason: 'malformed payload' };
     }
 
-    let result = { status: 'skipped', message: 'No handler matched' };
-
     try {
-      result = await this.syncService.handleJiraEvent(webhookEvent, payload);
+      // Build config from environment (legacy mode)
+      const legacyConfig = this.getLegacyConfig();
+      const result = await this.syncService.handleJiraEvent(webhookEvent, payload, legacyConfig);
+      return { received: true, ...result };
     } catch (err) {
-      this.logger.error(
-        `❌ [JIRA WEBHOOK] Sync error for "${webhookEvent}": ${err?.message}`,
-      );
-      // Return 200 so Jira does not retry
+      this.logger.error(`❌ [JIRA][legacy] Sync error: ${err?.message}`);
       return { received: true, status: 'error', error: err?.message };
     }
-
-    this.logger.log(
-      `📤 [JIRA WEBHOOK] Done — Status: "${result.status}" | ${result.message}`,
-    );
-
-    return { received: true, ...result };
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // POST /api/webhook/freshservice
-  // ─────────────────────────────────────────────────────────────
-  //
-  //  This controller is intentionally THIN.
-  //  All event classification is done inside FreshserviceClassifierService.
-  //  Controller responsibilities:
-  //    1. Validate payload is not empty
-  //    2. Log the raw incoming event for observability
-  //    3. Delegate to syncService.handleFreshserviceEvent()
-  //    4. Always return HTTP 200 (prevents FS retrying on transient errors)
-  // ─────────────────────────────────────────────────────────────
   @Post('freshservice')
   @HttpCode(HttpStatus.OK)
   async handleFreshserviceWebhook(
@@ -109,10 +166,10 @@ export class WebhookController {
     @Headers() headers: Record<string, string>,
     @Req() req: Request & { rawBody?: string },
   ) {
-    this.logger.debug(`\n--- INCOMING RAW PAYLOAD DUMP ---\nRAW BODY OVER WIRE: ${req.rawBody}\n---------------------------------`);
+    this.logger.debug(`\n--- INCOMING RAW PAYLOAD [legacy] ---\n${req.rawBody}\n---`);
 
     if (!payload || Object.keys(payload).length === 0) {
-      this.logger.warn('⚠️  [FS WEBHOOK] Empty payload — ignoring');
+      this.logger.warn('⚠️  [FS][legacy] Empty payload — ignoring');
       return { received: true, status: 'ignored', reason: 'empty payload' };
     }
 
@@ -120,60 +177,55 @@ export class WebhookController {
       payload = this.rescueMalformedPayload(payload, req.rawBody);
     }
 
-    // Lightweight pre-logging so we can trace in server logs before classifier runs
-    const rawType     = payload?.event_type ?? '(no event_type)';
-    const rawTicketId = payload?.ticket_id ?? payload?.ticket?.id ?? payload?.freshdesk_webhook?.ticket_id ?? 'n/a';
-    this.logger.log(
-      `\n${'═'.repeat(60)}\n` +
-      `📥 [FS WEBHOOK] Raw event: "${rawType}" | Ticket: ${rawTicketId}\n` +
-      `${'═'.repeat(60)}`,
-    );
-
-    let result: { status: string; message: string } = {
-      status: 'skipped',
-      message: 'No handler matched',
-    };
-
     try {
-      // Single call — classifier + routing happens inside SyncService
-      result = await this.syncService.handleFreshserviceEvent(payload);
+      const legacyConfig = this.getLegacyConfig();
+      const result = await this.syncService.handleFreshserviceEvent(payload, legacyConfig);
+      return { received: true, ...result };
     } catch (err) {
-      this.logger.error(
-        `❌ [FS WEBHOOK] Unhandled error for event "${rawType}": ${err?.message}`,
-      );
-      // Return 200 so Freshservice does not retry — error is already logged/audited
+      this.logger.error(`❌ [FS][legacy] Unhandled error: ${err?.message}`);
       return { received: true, status: 'error', error: err?.message };
     }
+  }
 
-    this.logger.log(
-      `📤 [FS WEBHOOK] Done — Status: "${result.status}" | ${result.message}`,
-    );
+  // ─────────────────────────────────────────────────────────────
+  // Private Helpers
+  // ─────────────────────────────────────────────────────────────
 
-    return { received: true, ...result };
+  /**
+   * getLegacyConfig()
+   * Builds a CustomerConfig from the global .env variables for backward compat.
+   * This is used when clients call the non-scoped webhook endpoints.
+   */
+  private getLegacyConfig(): import('../admin/customer-config.service').CustomerConfig {
+    return {
+      customerId: 'legacy',
+      slug: 'legacy',
+      name: 'Legacy (env-based)',
+      jiraBaseUrl:     process.env.JIRA_BASE_URL ?? '',
+      jiraEmail:       process.env.JIRA_EMAIL ?? '',
+      jiraApiToken:    process.env.JIRA_API_TOKEN ?? '',
+      jiraProjectKey:  process.env.JIRA_PROJECT_KEY ?? 'SCRUM',
+      freshserviceBaseUrl: process.env.FRESHSERVICE_BASE_URL ?? '',
+      freshserviceApiKey:  process.env.FRESHSERVICE_API_KEY ?? '',
+      fsCustomStatusAwaiting: process.env.FS_CUSTOM_STATUS_AWAITING ?? '',
+      fallbackEmail: process.env.FALLBACK_EMAIL ?? '',
+    };
   }
 
   /**
    * rescueMalformedPayload()
-   * ────────────────────────
    * Deeply aggressive rescue logic for Freshservice "Fake JSON" payloads.
-   * Handles:
-   *  1. JSON fragmented across object keys (body-parser splitting on '=' or '&')
-   *  2. Unquoted identifiers (e.g. "id": INC-321 which should be "INC-321")
-   *  3. Recursive reconstruction of broken form-data objects
    */
   private rescueMalformedPayload(payload: any, rawBody?: string): any {
     if (!payload || typeof payload !== 'object') return payload;
-    
-    // If it's already a valid FS event with event_type, don't mess with it
+
     if (payload.event_type || payload.freshdesk_webhook) return payload;
 
     try {
       let rawStr = '';
 
       if (rawBody && rawBody.trim() !== '') {
-        // Prefer the actual wire bytes if we captured them in main.ts
         rawStr = rawBody.trim();
-        // Since urlencoded format replaces spaces with + and encodes symbols, try decoding
         if (rawStr.includes('%') || rawStr.includes('+')) {
           try {
             rawStr = decodeURIComponent(rawStr.replace(/\+/g, ' '));
@@ -181,14 +233,12 @@ export class WebhookController {
             // ignore decode error
           }
         }
-        // If the payload was sent as `payload={...}` or just `{...}=`
         if (rawStr.startsWith('payload=')) {
           rawStr = rawStr.replace(/^payload=/, '');
         } else if (rawStr.endsWith('=')) {
           rawStr = rawStr.slice(0, -1);
         }
       } else {
-        // Fallback: Reconstruct raw string from the fragmented object
         const reconstruct = (obj: any): string => {
           let str = '';
           const entries = Object.entries(obj);
@@ -204,26 +254,18 @@ export class WebhookController {
         };
         rawStr = reconstruct(payload).trim();
       }
-      
+
       this.logger.debug(`🩹 [RESCUE] Reconstructed raw string: ${rawStr}`);
 
       if (!rawStr.startsWith('{')) return payload;
 
-      // 2. Fix common "Invalid JSON" errors from FS unquoted placeholders
-      // Example: "id": INC-321,           -> "id": "INC-321",
-      // Example: "priority": Medium,      -> "priority": "Medium",
-      // Example: "status": Open           -> "status": "Open"
       rawStr = rawStr.replace(/:\s*([a-zA-Z][a-zA-Z0-9_\-\s]*?)\s*([,}])/g, ': "$1"$2');
-      
-      // Fix unquoted keys in common nested patterns
       rawStr = rawStr.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
 
-      // 3. Bruteforce closing if it's truncated
-      // (Freshservice automation sometimes cuts off the end if there's an unescaped char)
       let attempts = 0;
       let finalParsed = null;
       let currentStr = rawStr;
-      
+
       while (attempts < 5) {
         try {
           finalParsed = JSON.parse(currentStr);

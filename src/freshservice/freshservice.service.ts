@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import axios from 'axios';
+import { CustomerConfig } from '../admin/customer-config.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const FormData = require('form-data');
 
@@ -11,13 +12,9 @@ const FormData = require('form-data');
  * ───────────────────
  * Handles ALL outbound REST API calls to Freshservice.
  *
- * Endpoints used:
- *   POST   /api/v2/tickets              → Create ticket
- *   PUT    /api/v2/tickets/:id          → Update ticket (subject, description, status, priority)
- *   POST   /api/v2/tickets/:id/notes    → Add a note / comment
- *   GET    /api/v2/tickets/:id          → Fetch ticket details
- *
- * Auth: Basic Auth (API_KEY:X base64 encoded)
+ * Now fully multi-tenant: every public method accepts an optional
+ * CustomerConfig object. When provided, it uses customer-specific
+ * credentials; otherwise falls back to global .env values.
  *
  * Freshservice status codes:
  *   2 = Open  |  3 = Pending  |  4 = Resolved  |  5 = Closed
@@ -35,15 +32,17 @@ export class FreshserviceService {
   ) {}
 
   // ─────────────────────────────────────────────────────────────
-  // Private Helpers
+  // Private Helpers — tenant-aware
   // ─────────────────────────────────────────────────────────────
 
-  private get baseUrl(): string {
-    return this.configService.get<string>('FRESHSERVICE_BASE_URL') as string;
+  private getBaseUrl(cfg?: CustomerConfig): string {
+    return cfg?.freshserviceBaseUrl ||
+      this.configService.get<string>('FRESHSERVICE_BASE_URL') as string;
   }
 
-  private getHeaders() {
-    const apiKey = this.configService.get<string>('FRESHSERVICE_API_KEY');
+  private getHeaders(cfg?: CustomerConfig) {
+    const apiKey = cfg?.freshserviceApiKey ||
+      this.configService.get<string>('FRESHSERVICE_API_KEY');
     const encoded = Buffer.from(`${apiKey}:X`).toString('base64');
     return {
       Authorization: `Basic ${encoded}`,
@@ -55,8 +54,10 @@ export class FreshserviceService {
     method: 'get' | 'post' | 'put' | 'patch' | 'delete',
     path: string,
     data?: any,
+    cfg?: CustomerConfig,
   ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    const baseUrl = this.getBaseUrl(cfg);
+    const url = `${baseUrl}${path}`;
     this.logger.log(`📡 [FS] ${method.toUpperCase()} → ${url}`);
     if (data) {
       this.logger.debug(`📦 Payload: ${JSON.stringify(data, null, 2)}`);
@@ -68,7 +69,7 @@ export class FreshserviceService {
           method,
           url,
           data,
-          headers: this.getHeaders(),
+          headers: this.getHeaders(cfg),
         }),
       );
       return response.data;
@@ -131,18 +132,19 @@ export class FreshserviceService {
   /**
    * createTicket()
    * Fired when a Jira issue is CREATED.
-   * Creates a matching ticket in Freshservice with subject, description,
-   * priority, and status all correctly mapped.
    */
-  async createTicket(data: {
-    subject: string;
-    description: string;
-    priority: number;
-    status: number;
-    email: string;
-    tags?: string[];
-    sourceLabel?: string;
-  }): Promise<any> {
+  async createTicket(
+    data: {
+      subject: string;
+      description: string;
+      priority: number;
+      status: number;
+      email: string;
+      tags?: string[];
+      sourceLabel?: string;
+    },
+    cfg?: CustomerConfig,
+  ): Promise<any> {
     this.logger.log(`\n🚀 [FS] createTicket → "${data.subject}"`);
 
     const payload: any = {
@@ -155,18 +157,18 @@ export class FreshserviceService {
       tags: data.tags ?? ['jira-sync'],
     };
 
-    // ── Required custom field (instance-specific) ─────────────────
-    // Some Freshservice instances mandate custom fields on ticket creation.
-    // Set FS_CUSTOM_STATUS_AWAITING in .env to the desired value, e.g.:
-    //   "Confirm Resolution" | "Meeting Required" | etc.
-    const customStatusAwaiting = this.configService.get<string>('FS_CUSTOM_STATUS_AWAITING');
+    // Use customer-specific custom field or fall back to env
+    const customStatusAwaiting =
+      cfg?.fsCustomStatusAwaiting ||
+      this.configService.get<string>('FS_CUSTOM_STATUS_AWAITING');
+
     if (customStatusAwaiting) {
       payload.custom_fields = {
         status_awaiting_customer_response: customStatusAwaiting,
       };
     }
 
-    const result = await this.request('post', '/api/v2/tickets', payload);
+    const result = await this.request('post', '/api/v2/tickets', payload, cfg);
     const ticket = result?.ticket;
 
     this.logger.log(
@@ -180,8 +182,7 @@ export class FreshserviceService {
 
   /**
    * updateTicket()
-   * Fired when a Jira issue is UPDATED (summary, description, status, priority).
-   * Only sends the fields that actually changed.
+   * Fired when a Jira issue is UPDATED.
    */
   async updateTicket(
     ticketId: number,
@@ -191,10 +192,11 @@ export class FreshserviceService {
       priority?: number;
       status?: number;
     },
+    cfg?: CustomerConfig,
   ): Promise<any> {
     this.logger.log(`\n🔄 [FS] updateTicket #${ticketId} → ${JSON.stringify(data)}`);
 
-    const result = await this.request('put', `/api/v2/tickets/${ticketId}`, data);
+    const result = await this.request('put', `/api/v2/tickets/${ticketId}`, data, cfg);
     const ticket = result?.ticket;
 
     this.logger.log(
@@ -209,12 +211,12 @@ export class FreshserviceService {
   /**
    * addNote()
    * Fired when a Jira comment is CREATED or UPDATED.
-   * Adds a public/private note to the Freshservice ticket conversation.
    */
   async addNote(
     ticketId: number,
     body: string,
     options: { isPrivate?: boolean; authorName?: string } = {},
+    cfg?: CustomerConfig,
   ): Promise<any> {
     const { isPrivate = false, authorName = 'Jira (via Sync)' } = options;
 
@@ -222,10 +224,8 @@ export class FreshserviceService {
       `\n💬 [FS] addNote → Ticket #${ticketId} [${isPrivate ? 'Private' : 'Public'}]`,
     );
 
-    const noteBody = `<p><strong>📌 Synced from Jira</strong> — ${authorName}</p><p>${body}</p>`;
-
     const payload = {
-      body: noteBody,
+      body,
       private: isPrivate,
     };
 
@@ -233,6 +233,7 @@ export class FreshserviceService {
       'post',
       `/api/v2/tickets/${ticketId}/notes`,
       payload,
+      cfg,
     );
 
     this.logger.log(`✅ [FS] Note added to ticket #${ticketId}`);
@@ -242,13 +243,18 @@ export class FreshserviceService {
   /**
    * getConversations()
    * Fetches all notes and replies for a specific ticket.
-   * Useful when the webhook payload (like ticket_updated) lacks the latest public reply.
    */
-  async getConversations(ticketId: number): Promise<any[]> {
+  async getConversations(ticketId: number, cfg?: CustomerConfig): Promise<any[]> {
     this.logger.log(`\n🔍 [FS] Fetching conversations for Ticket #${ticketId}`);
     try {
-      const result = await this.request('get', `/api/v2/tickets/${ticketId}/conversations`);
-      return result?.conversations ?? [];
+      const result = await this.request('get', `/api/v2/tickets/${ticketId}?include=conversations`, undefined, cfg);
+
+      this.logger.log(
+        `📡 [FS API] GET Conversations Response for #${ticketId}:\n` +
+        JSON.stringify(result?.ticket?.conversations || [], null, 2)
+      );
+
+      return result?.ticket?.conversations ?? [];
     } catch (err) {
       this.logger.error(`❌ [FS] Failed to fetch conversations for Ticket #${ticketId}`);
       return [];
@@ -257,14 +263,12 @@ export class FreshserviceService {
 
   /**
    * uploadAttachments()  [Jira → Freshservice]
-   * Downloads each attachment binary from Jira (using Jira credentials)
-   * and re-uploads it to the Freshservice ticket note as multipart/form-data.
-   * Falls back to a link-note for any file that fails to transfer.
    */
   async uploadAttachments(
     ticketId: number,
     attachments: Array<{ filename: string; content_url: string }>,
     authorName = 'Jira (via Sync)',
+    cfg?: CustomerConfig,
   ): Promise<{ uploaded: number; fallback: number }> {
     this.logger.log(
       `\n📎 [FS] uploadAttachments → Ticket #${ticketId} — ${attachments.length} attachment(s)`,
@@ -273,15 +277,15 @@ export class FreshserviceService {
     let uploaded = 0;
     const failed: Array<{ filename: string; content_url: string }> = [];
 
-    const jiraEmail = this.configService.get<string>('JIRA_EMAIL') as string;
-    const jiraToken = this.configService.get<string>('JIRA_API_TOKEN') as string;
+    const jiraEmail = cfg?.jiraEmail || this.configService.get<string>('JIRA_EMAIL') as string;
+    const jiraToken = cfg?.jiraApiToken || this.configService.get<string>('JIRA_API_TOKEN') as string;
     const jiraBasic = Buffer.from(`${jiraEmail}:${jiraToken}`).toString('base64');
-    const fsApiKey  = this.configService.get<string>('FRESHSERVICE_API_KEY') as string;
+    const fsApiKey  = cfg?.freshserviceApiKey || this.configService.get<string>('FRESHSERVICE_API_KEY') as string;
     const fsBasic   = Buffer.from(`${fsApiKey}:X`).toString('base64');
+    const fsBaseUrl = this.getBaseUrl(cfg);
 
     for (const attachment of attachments) {
       try {
-        // ── Step 1: Download binary from Jira ──────────────────────
         this.logger.log(`   📥 Downloading "${attachment.filename}" from Jira...`);
         const fileRes = await axios.get<Buffer>(attachment.content_url, {
           responseType: 'arraybuffer',
@@ -293,7 +297,6 @@ export class FreshserviceService {
         const contentType = (fileRes.headers['content-type'] as string) ?? 'application/octet-stream';
         this.logger.log(`   ✅ Downloaded ${buffer.length} bytes (${contentType})`);
 
-        // ── Step 2: Upload to Freshservice as note with attachment ──
         const form = new FormData();
         form.append(
           'body',
@@ -307,7 +310,7 @@ export class FreshserviceService {
         });
 
         await axios.post(
-          `${this.baseUrl}/api/v2/tickets/${ticketId}/notes`,
+          `${fsBaseUrl}/api/v2/tickets/${ticketId}/notes`,
           form,
           {
             headers: {
@@ -329,7 +332,7 @@ export class FreshserviceService {
       }
     }
 
-    // ── Fallback: add a note with download links for failed uploads ──
+    // Fallback: add a note with download links for failed uploads
     if (failed.length > 0) {
       const links = failed
         .map((a) => `<li><a href="${a.content_url}" target="_blank">${a.filename}</a></li>`)
@@ -337,7 +340,7 @@ export class FreshserviceService {
       const body =
         `<p><strong>📎 Attachments from Jira (download links)</strong> — ${authorName}</p>` +
         `<ul>${links}</ul>`;
-      await this.request('post', `/api/v2/tickets/${ticketId}/notes`, { body, private: false });
+      await this.request('post', `/api/v2/tickets/${ticketId}/notes`, { body, private: false }, cfg);
       this.logger.log(`   ℹ️  [FS] Fallback link note added for ${failed.length} attachment(s)`);
     }
 
@@ -351,9 +354,9 @@ export class FreshserviceService {
    * getTicket()
    * Fetch full ticket details from Freshservice.
    */
-  async getTicket(ticketId: number): Promise<any> {
+  async getTicket(ticketId: number, cfg?: CustomerConfig): Promise<any> {
     this.logger.log(`\n🔍 [FS] getTicket #${ticketId}`);
-    const result = await this.request('get', `/api/v2/tickets/${ticketId}`);
+    const result = await this.request('get', `/api/v2/tickets/${ticketId}`, undefined, cfg);
     return result?.ticket;
   }
 }

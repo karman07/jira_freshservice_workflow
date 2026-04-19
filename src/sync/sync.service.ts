@@ -10,6 +10,7 @@ import {
   TicketMappingDocument,
 } from '../database/schemas/ticket-mapping.schema';
 import { SyncLog, SyncLogDocument } from '../database/schemas/sync-log.schema';
+import { CustomerConfig } from '../admin/customer-config.service';
 import { createHash } from 'crypto';
 
 /**
@@ -17,26 +18,16 @@ import { createHash } from 'crypto';
  * ───────────
  * The orchestration brain of the entire integration.
  *
+ * Now fully multi-tenant: every entry point accepts a CustomerConfig object
+ * that carries the tenant's Jira + Freshservice credentials. All downstream
+ * calls to JiraService and FreshserviceService are forwarded that config so
+ * they hit the correct tenant API, not the global .env defaults.
+ *
  * Responsibilities:
- *   1. Loop Prevention   — Checks `lastUpdatedSource` in MongoDB before syncing.
- *                          If FS triggered the event, we skip pushing back to FS,
- *                          and vice versa for Jira.
- *   2. Ticket Mapping    — Maintains the Jira ↔ Freshservice ID link in MongoDB.
+ *   1. Loop Prevention   — Checks `lastUpdatedSource` per tenant mapping.
+ *   2. Ticket Mapping    — Scoped per customer via customerId field.
  *   3. Event Routing     — Routes each event type to the correct API call.
- *   4. Audit Logging     — Every sync attempt (success / failure / skipped)
- *                          is written to the sync_logs collection.
- *
- * Supported Jira → Freshservice Events:
- *   issue_created        → createTicket()
- *   issue_updated        → updateTicket() + status/priority updates
- *   comment_created      → addNote()
- *   attachment_added     → addAttachmentNote()
- *
- * Supported Freshservice → Jira Events:
- *   ticket_created       → createIssue()
- *   ticket_updated       → updateIssue() + transitionIssue()
- *   note_created         → addComment()
- *   attachment_added     → addAttachmentComment()
+ *   4. Audit Logging     — Every sync attempt written to sync_logs collection.
  */
 @Injectable()
 export class SyncService {
@@ -60,13 +51,15 @@ export class SyncService {
   /**
    * handleJiraEvent()
    * Entry point for all events coming from the Jira webhook.
+   * Requires a CustomerConfig to know which tenant is sending the event.
    */
   async handleJiraEvent(
     webhookEvent: string,
     payload: any,
+    customerConfig: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
     this.logger.log(
-      `\n${'─'.repeat(60)}\n🎯 [SYNC] Jira Event: "${webhookEvent}"\n${'─'.repeat(60)}`,
+      `\n${'─'.repeat(60)}\n🎯 [SYNC][${customerConfig.slug}] Jira Event: "${webhookEvent}"\n${'─'.repeat(60)}`,
     );
 
     const issue = payload?.issue;
@@ -79,28 +72,21 @@ export class SyncService {
       return { status: 'skipped', message: 'Missing issue key/id' };
     }
 
-    // ── Event: issue_created ────────────────────────────────────
     if (webhookEvent === 'jira:issue_created') {
-      return this.handleJiraIssueCreated(jiraIssueKey, jiraIssueId, fields, payload);
+      return this.handleJiraIssueCreated(jiraIssueKey, jiraIssueId, fields, payload, customerConfig);
     }
 
-    // ── Event: issue_updated ────────────────────────────────────
     if (webhookEvent === 'jira:issue_updated') {
-      return this.handleJiraIssueUpdated(jiraIssueKey, jiraIssueId, fields, payload);
+      return this.handleJiraIssueUpdated(jiraIssueKey, jiraIssueId, fields, payload, customerConfig);
     }
 
-    // ── Event: comment_created / comment_updated ─────────────────────
     if (
       webhookEvent === 'comment_created' ||
       webhookEvent === 'comment_updated'
     ) {
-      return this.handleJiraCommentCreated(jiraIssueKey, jiraIssueId, payload);
+      return this.handleJiraCommentCreated(jiraIssueKey, jiraIssueId, payload, customerConfig);
     }
 
-    // ── Event: attachment_created ───────────────────────────────
-    // NOTE: jira:attachment_created webhooks often arrive empty (no attachment
-    // data in the payload). Attachments are reliably synced by detecting
-    // changelog.field === "Attachment" inside jira:issue_updated. Ignore this.
     if (webhookEvent === 'jira:attachment_created') {
       this.logger.log(
         `ℹ️  [SYNC] jira:attachment_created ignored — attachments handled via issue_updated changelog`,
@@ -118,42 +104,33 @@ export class SyncService {
     jiraIssueId: string,
     fields: any,
     payload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    // ── Idempotency guard ──────────────────────────────────────────
-    const existing = await this.ticketMappingModel.findOne({ jiraIssueId });
+    // Idempotency guard — scoped per customer
+    const existing = await this.ticketMappingModel.findOne({ customerId: cfg.customerId, jiraIssueId });
     if (existing) {
       this.logger.warn(
-        `⚠️  [SYNC] Mapping already exists for ${jiraIssueKey} → FS#${existing.freshserviceTicketId} — skipping duplicate create`,
+        `⚠️  [SYNC][${cfg.slug}] Mapping already exists for ${jiraIssueKey} → FS#${existing.freshserviceTicketId}`,
       );
       return { status: 'skipped', message: 'Mapping already exists' };
     }
 
     const summary = fields?.summary ?? 'No Subject';
 
-    // ── Loop prevention ──────────────────────────────────────────
-    // If this Jira issue was CREATED BY US from a Freshservice ticket its
-    // summary will start with "[FS-XXX]" (set by processCreate). Syncing it
-    // back would create an infinite loop.
+    // Loop prevention: skip if created by FS sync
     if (/^\[FS-\d+\]/.test(summary)) {
       this.logger.warn(
-        `🔄 [SYNC] Loop prevention: ${jiraIssueKey} was created by FS sync ("${summary}") — skipping`,
+        `🔄 [SYNC][${cfg.slug}] Loop prevention: ${jiraIssueKey} originated from Freshservice`,
       );
       return { status: 'skipped', message: 'Loop prevention: issue originated from Freshservice' };
     }
 
-    // Also skip if the issue carries our sync tags (belt & suspenders)
     const issueTags: string[] = fields?.labels ?? [];
     if (issueTags.includes('freshservice-sync') || issueTags.includes('jira-sync')) {
-      this.logger.warn(
-        `🔄 [SYNC] Loop prevention: ${jiraIssueKey} has sync label — skipping`,
-      );
+      this.logger.warn(`🔄 [SYNC][${cfg.slug}] Loop prevention: sync label detected on ${jiraIssueKey}`);
       return { status: 'skipped', message: 'Loop prevention: sync label detected' };
     }
 
-    // ── Safe priority + status mapping ───────────────────────────────
-    // PRIORITY_MAP and STATUS_MAP return undefined for unknown names;
-    // Number(undefined) = NaN which causes Mongoose cast errors.
-    // Always fall back to valid FS defaults: priority=2 (Medium), status=2 (Open).
     const priorityName = fields?.priority?.name ?? '';
     const statusName   = fields?.status?.name   ?? '';
     const priority = Math.max(1, Math.min(4,
@@ -166,11 +143,12 @@ export class SyncService {
     const description = this.extractJiraDescription(fields?.description);
     const email =
       fields?.reporter?.emailAddress ??
+      cfg.fallbackEmail ??
       this.configService.get<string>('FALLBACK_EMAIL') ??
-      'karmansingharora01@gmail.com';
+      'support@example.com';
 
     this.logger.log(
-      `📋 [SYNC] Creating FS ticket for ${jiraIssueKey}: "${summary}" ` +
+      `📋 [SYNC][${cfg.slug}] Creating FS ticket for ${jiraIssueKey}: "${summary}" ` +
       `[Priority: ${priorityName}(${priority})] [Status: ${statusName}(${status})]`,
     );
 
@@ -182,22 +160,23 @@ export class SyncService {
         status,
         email,
         tags: ['jira-sync', jiraIssueKey],
-      });
+      }, cfg);
 
-      // Persist mapping
       await this.ticketMappingModel.create({
+        customerId: cfg.customerId,
         jiraIssueKey,
         jiraIssueId,
         freshserviceTicketId: fsTicket.id,
         lastUpdatedSource: 'jira',
         summary,
         jiraStatus: statusName || 'Unknown',
-        freshserviceStatus: status,          // guaranteed 2–5
+        freshserviceStatus: status,
         jiraPriority: priorityName || 'Unknown',
-        freshservicePriority: priority,      // guaranteed 1–4
+        freshservicePriority: priority,
       });
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'issue_created',
         source: 'jira',
         destination: 'freshservice',
@@ -210,14 +189,12 @@ export class SyncService {
       });
 
       this.logger.log(
-        `✅ [SYNC] ${jiraIssueKey} → FS Ticket #${fsTicket.id} CREATED successfully`,
+        `✅ [SYNC][${cfg.slug}] ${jiraIssueKey} → FS Ticket #${fsTicket.id} CREATED`,
       );
-      return {
-        status: 'success',
-        message: `FS Ticket #${fsTicket.id} created for ${jiraIssueKey}`,
-      };
+      return { status: 'success', message: `FS Ticket #${fsTicket.id} created for ${jiraIssueKey}` };
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'issue_created',
         source: 'jira',
         destination: 'freshservice',
@@ -237,25 +214,18 @@ export class SyncService {
     jiraIssueId: string,
     fields: any,
     payload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    const mapping = await this.ticketMappingModel.findOne({ jiraIssueId });
+    const mapping = await this.ticketMappingModel.findOne({ customerId: cfg.customerId, jiraIssueId });
 
     if (!mapping) {
-      this.logger.warn(
-        `⚠️  [SYNC] No mapping for ${jiraIssueKey} on issue_updated — skipping`,
-      );
+      this.logger.warn(`⚠️  [SYNC][${cfg.slug}] No mapping for ${jiraIssueKey} — skipping`);
       return { status: 'skipped', message: 'No ticket mapping' };
     }
 
-    // ── Loop Prevention ─────────────────────────────────────────
     if (mapping.lastUpdatedSource === 'freshservice') {
-      this.logger.warn(
-        `🔄 [SYNC] Loop prevention: ${jiraIssueKey} was last updated by Freshservice — skipping sync back`,
-      );
-      await this.ticketMappingModel.updateOne(
-        { jiraIssueId },
-        { lastUpdatedSource: 'jira' },
-      );
+      this.logger.warn(`🔄 [SYNC][${cfg.slug}] Loop prevention: ${jiraIssueKey} was last updated by FS`);
+      await this.ticketMappingModel.updateOne({ customerId: cfg.customerId, jiraIssueId }, { lastUpdatedSource: 'jira' });
       return { status: 'skipped', message: 'Loop prevention triggered' };
     }
 
@@ -263,22 +233,19 @@ export class SyncService {
     const changedFields = payload?.changelog?.items ?? [];
 
     this.logger.log(
-      `📋 [SYNC] Updating FS #${fsTicketId} for ${jiraIssueKey} — ` +
+      `📋 [SYNC][${cfg.slug}] Updating FS #${fsTicketId} for ${jiraIssueKey} — ` +
       `Changed fields: [${changedFields.map((c: any) => c.field).join(', ')}]`,
     );
 
-    // ── Attachment changes come via issue_updated changelog ───────
-    // jira:attachment_created is unreliable (often empty). The reliable
-    // signal is changelog.field === "Attachment" inside issue_updated.
+    // Attachment changes come via issue_updated changelog
     const hasAttachmentChange = changedFields.some(
       (c: any) => c.field?.toLowerCase() === 'attachment',
     );
     if (hasAttachmentChange) {
-      this.logger.log(`📎 [SYNC] Attachment change in changelog — routing to attachment handler`);
-      return this.handleJiraAttachmentAdded(jiraIssueKey, jiraIssueId, fields, payload);
+      this.logger.log(`📎 [SYNC][${cfg.slug}] Attachment change detected — routing to attachment handler`);
+      return this.handleJiraAttachmentAdded(jiraIssueKey, jiraIssueId, fields, payload, cfg);
     }
 
-    // ── Regular field update ─────────────────────────────────────
     const updatePayload: any = {};
 
     for (const change of changedFields) {
@@ -291,7 +258,6 @@ export class SyncService {
         updatePayload.description = this.extractJiraDescription(fields?.description);
       }
       if (field === 'priority') {
-        // NaN-safe: PRIORITY_MAP returns undefined for unknown names → NaN → fallback 2
         const newPriority = Math.max(1, Math.min(4,
           Number(FreshserviceService.PRIORITY_MAP[change.toString ?? fields?.priority?.name]) || 2,
         ));
@@ -299,7 +265,6 @@ export class SyncService {
         this.logger.log(`   🎯 Priority: "${change.fromString}" → "${change.toString}" (FS: ${newPriority})`);
       }
       if (field === 'status') {
-        // NaN-safe: STATUS_MAP returns undefined for unknown names → NaN → fallback 2
         const newStatus = Math.max(2, Math.min(5,
           Number(FreshserviceService.STATUS_MAP[change.toString ?? fields?.status?.name]) || 2,
         ));
@@ -308,17 +273,16 @@ export class SyncService {
       }
     }
 
-    // If nothing to update (e.g. only a label/sprint change), skip
     if (Object.keys(updatePayload).length === 0) {
-      this.logger.log(`ℹ️  [SYNC] No relevant field changes for FS — skipping update`);
+      this.logger.log(`ℹ️  [SYNC][${cfg.slug}] No relevant field changes for FS — skipping update`);
       return { status: 'skipped', message: 'No relevant field changes' };
     }
 
     try {
-      await this.freshserviceService.updateTicket(fsTicketId, updatePayload);
+      await this.freshserviceService.updateTicket(fsTicketId, updatePayload, cfg);
 
       await this.ticketMappingModel.updateOne(
-        { jiraIssueId },
+        { customerId: cfg.customerId, jiraIssueId },
         {
           lastUpdatedSource: 'jira',
           lastSyncedAt: new Date(),
@@ -329,6 +293,7 @@ export class SyncService {
       );
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'issue_updated',
         source: 'jira',
         destination: 'freshservice',
@@ -340,10 +305,11 @@ export class SyncService {
         sentPayload: updatePayload,
       });
 
-      this.logger.log(`✅ [SYNC] ${jiraIssueKey} → FS #${fsTicketId} UPDATED successfully`);
+      this.logger.log(`✅ [SYNC][${cfg.slug}] ${jiraIssueKey} → FS #${fsTicketId} UPDATED`);
       return { status: 'success', message: `FS #${fsTicketId} updated for ${jiraIssueKey}` };
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'issue_updated',
         source: 'jira',
         destination: 'freshservice',
@@ -363,23 +329,17 @@ export class SyncService {
     jiraIssueKey: string,
     jiraIssueId: string,
     payload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    const mapping = await this.ticketMappingModel.findOne({ jiraIssueId });
+    const mapping = await this.ticketMappingModel.findOne({ customerId: cfg.customerId, jiraIssueId });
     if (!mapping) {
-      this.logger.warn(
-        `⚠️  [SYNC] No mapping for ${jiraIssueKey} on comment — skipping`,
-      );
+      this.logger.warn(`⚠️  [SYNC][${cfg.slug}] No mapping for ${jiraIssueKey} on comment — skipping`);
       return { status: 'skipped', message: 'No ticket mapping found' };
     }
 
     if (mapping.lastUpdatedSource === 'freshservice') {
-      this.logger.warn(
-        `🔄 [SYNC] Comment loop prevention for ${jiraIssueKey}`,
-      );
-      await this.ticketMappingModel.updateOne(
-        { jiraIssueId },
-        { lastUpdatedSource: 'jira' },
-      );
+      this.logger.warn(`🔄 [SYNC][${cfg.slug}] Comment loop prevention for ${jiraIssueKey}`);
+      await this.ticketMappingModel.updateOne({ customerId: cfg.customerId, jiraIssueId }, { lastUpdatedSource: 'jira' });
       return { status: 'skipped', message: 'Comment loop prevention' };
     }
 
@@ -389,22 +349,27 @@ export class SyncService {
     const authorName = comment?.author?.displayName ?? 'Jira User';
 
     this.logger.log(
-      `💬 [SYNC] Comment from ${authorName} on ${jiraIssueKey} → FS #${mapping.freshserviceTicketId}`,
+      `💬 [SYNC][${cfg.slug}] Comment from ${authorName} on ${jiraIssueKey} → FS #${mapping.freshserviceTicketId}`,
     );
 
     try {
-      await this.freshserviceService.addNote(
+      const fsNote = await this.freshserviceService.addNote(
         mapping.freshserviceTicketId,
         commentBody,
         { isPrivate: false, authorName },
+        cfg,
       );
 
-      await this.ticketMappingModel.updateOne(
-        { jiraIssueId },
-        { lastUpdatedSource: 'jira', lastSyncedAt: new Date() },
-      );
+      const updatePayload: any = { lastUpdatedSource: 'jira', lastSyncedAt: new Date() };
+      if (fsNote && fsNote.id) {
+        updatePayload.lastNoteId = fsNote.id;
+        this.logger.log(`📍 [SYNC][${cfg.slug}] Set lastNoteId to ${fsNote.id} to prevent loopback.`);
+      }
+
+      await this.ticketMappingModel.updateOne({ customerId: cfg.customerId, jiraIssueId }, updatePayload);
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'comment_created',
         source: 'jira',
         destination: 'freshservice',
@@ -415,12 +380,11 @@ export class SyncService {
         sentPayload: { body: commentBody.substring(0, 200) },
       });
 
-      this.logger.log(
-        `✅ [SYNC] Comment synced: ${jiraIssueKey} → FS #${mapping.freshserviceTicketId}`,
-      );
+      this.logger.log(`✅ [SYNC][${cfg.slug}] Comment synced: ${jiraIssueKey} → FS #${mapping.freshserviceTicketId}`);
       return { status: 'success', message: 'Comment note added to Freshservice' };
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'comment_created',
         source: 'jira',
         destination: 'freshservice',
@@ -440,8 +404,9 @@ export class SyncService {
     jiraIssueId: string,
     fields: any,
     payload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    const mapping = await this.ticketMappingModel.findOne({ jiraIssueId });
+    const mapping = await this.ticketMappingModel.findOne({ customerId: cfg.customerId, jiraIssueId });
     if (!mapping) {
       return { status: 'skipped', message: 'No ticket mapping found' };
     }
@@ -460,9 +425,12 @@ export class SyncService {
       const result = await this.freshserviceService.uploadAttachments(
         mapping.freshserviceTicketId,
         attachments,
+        'Jira (via Sync)',
+        cfg,
       );
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'attachment_added',
         source: 'jira',
         destination: 'freshservice',
@@ -470,19 +438,13 @@ export class SyncService {
         jiraIssueKey,
         freshserviceTicketId: mapping.freshserviceTicketId,
         status: 'success',
-        sentPayload: {
-          attachmentCount: attachments.length,
-          uploaded: result.uploaded,
-          fallback: result.fallback,
-        },
+        sentPayload: { attachmentCount: attachments.length, uploaded: result.uploaded, fallback: result.fallback },
       });
 
-      return {
-        status: 'success',
-        message: `${result.uploaded} attachment(s) uploaded to FS, ${result.fallback} via link note`,
-      };
+      return { status: 'success', message: `${result.uploaded} attachment(s) uploaded to FS, ${result.fallback} via link note` };
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'attachment_added',
         source: 'jira',
         destination: 'freshservice',
@@ -497,91 +459,83 @@ export class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // ② FRESHSERVICE → JIRA  (3-webhook model)
-  //
-  //    All FS events pass through ONE entry point → classifier
-  //    routes to processCreate | processUpdate | processNote | processAttachment
-  //
-  //    Loop prevention: mapping.lastUpdatedSource === 'freshservice'
-  //      → SKIP (Jira update would echo back to us)
+  // ② FRESHSERVICE → JIRA
   // ─────────────────────────────────────────────────────────────
 
   /**
    * handleFreshserviceEvent()
-   * ─────────────────────────
    * SINGLE entry point for all Freshservice webhook payloads.
-   * Does NOT accept an event_type parameter — classification is
-   * handled entirely by FreshserviceClassifierService.
+   * Requires a CustomerConfig to know which tenant is sending the event.
    */
   async handleFreshserviceEvent(
     rawPayload: any,
+    customerConfig: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
     const separator = '═'.repeat(60);
-    this.logger.log(`\n${separator}\n📥 [FS→JIRA] Incoming Freshservice webhook\n${separator}`);
+    this.logger.log(`\n${separator}\n📥 [FS→JIRA][${customerConfig.slug}] Incoming Freshservice webhook\n${separator}`);
 
-    // ── Step 1: Classify ─────────────────────────────────────────
     const event = this.classifier.classify(rawPayload);
 
     if (event.type === 'unknown') {
-      this.logger.warn(`⚠️  [FS→JIRA] Skipped: ${event.reason}`);
+      this.logger.warn(`⚠️  [FS→JIRA][${customerConfig.slug}] Skipped: ${event.reason}`);
       return { status: 'skipped', message: event.reason };
     }
 
     this.logger.log(
-      `🎯 [FS→JIRA] Classified as: "${event.type.toUpperCase()}" | Ticket #${event.ticketId}`,
+      `🎯 [FS→JIRA][${customerConfig.slug}] Classified as: "${event.type.toUpperCase()}" | Ticket #${event.ticketId}`,
     );
 
-    // ── Step 2: Fetch mapping ONCE ────────────────────────────────
-    // processCreate doesn't need an existing mapping,
-    // all other processors do.
     let mapping =
       event.type !== 'create'
         ? await this.ticketMappingModel.findOne({
+            customerId: customerConfig.customerId,
             freshserviceTicketId: event.ticketId,
           })
         : null;
 
-    // ── Step 3: Route to the correct processor ────────────────────
     try {
       switch (event.type) {
-        case 'create':
-          return this.processCreate(event, rawPayload);
+        case 'create': {
+          const createResult = await this.processCreate(event, rawPayload, customerConfig);
+          if (createResult.status === 'success') {
+            const mappingAfterCreate = await this.ticketMappingModel.findOne({
+              customerId: customerConfig.customerId,
+              freshserviceTicketId: event.ticketId,
+            });
+            if (mappingAfterCreate) {
+              const conversations = await this.freshserviceService.getConversations(event.ticketId, customerConfig);
+              await this.processNotes(conversations, mappingAfterCreate, customerConfig);
+            }
+          }
+          return createResult;
+        }
 
         case 'update':
           if (!mapping) {
-            this.logger.warn(
-              `⚠️  [FS→JIRA] No mapping for FS#${event.ticketId} — attempting create`,
-            );
-            return this.processCreate(
-              {
-                type: 'create',
-                ticketId: event.ticketId,
-                subject:     event.subject ?? 'No Subject',
-                description: '',
-                fsPriority:  event.fsPriority ?? 2,
-                fsStatus:    event.fsStatus   ?? 2,
-              },
-              rawPayload,
-            );
+            this.logger.warn(`⚠️  [FS→JIRA][${customerConfig.slug}] No mapping for FS#${event.ticketId} — attempting create`);
+            return this.processCreate({
+              type: 'create',
+              ticketId: event.ticketId,
+              subject: event.subject ?? 'No Subject',
+              description: '',
+              fsPriority: event.fsPriority ?? 2,
+              fsStatus: event.fsStatus ?? 2,
+            }, rawPayload, customerConfig);
           }
-          return this.processUpdate(event, mapping, rawPayload);
-
-        case 'note':
-          if (!mapping) {
-            this.logger.warn(`⚠️  [FS→JIRA] No mapping for FS#${event.ticketId} note — skipping`);
-            return { status: 'skipped', message: 'No mapping for note' };
-          }
-          return this.processNote(event, mapping);
+          return this.handleFreshserviceUpdate(event, mapping, rawPayload, customerConfig);
 
         case 'attachment':
           if (!mapping) {
-            this.logger.warn(`⚠️  [FS→JIRA] No mapping for FS#${event.ticketId} attachment — skipping`);
+            this.logger.warn(`⚠️  [FS→JIRA][${customerConfig.slug}] No mapping for FS#${event.ticketId} attachment — skipping`);
             return { status: 'skipped', message: 'No mapping for attachment' };
           }
-          return this.processAttachment(event, mapping);
+          return this.processAttachment(event, mapping, customerConfig);
+
+        default:
+          return { status: 'skipped', message: 'Unhandled event type' };
       }
     } catch (err) {
-      this.logger.error(`❌ [FS→JIRA] Processor error: ${err?.message}`);
+      this.logger.error(`❌ [FS→JIRA][${customerConfig.slug}] Processor error: ${err?.message}`);
       throw err;
     }
   }
@@ -590,33 +544,33 @@ export class SyncService {
   private async processCreate(
     event: { type: 'create'; ticketId: number; subject: string; description: string; fsPriority: number; fsStatus: number },
     rawPayload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    // Idempotency guard
     const existing = await this.ticketMappingModel.findOne({
+      customerId: cfg.customerId,
       freshserviceTicketId: event.ticketId,
     });
     if (existing) {
-      this.logger.warn(
-        `⚠️  [processCreate] Mapping already exists: FS#${event.ticketId} → ${existing.jiraIssueKey}`,
-      );
+      this.logger.warn(`⚠️  [processCreate][${cfg.slug}] Mapping already exists: FS#${event.ticketId} → ${existing.jiraIssueKey}`);
       return { status: 'skipped', message: 'Mapping already exists' };
     }
 
     const priorityName = JiraService.PRIORITY_MAP[event.fsPriority] ?? 'Medium';
 
     this.logger.log(
-      `🚀 [processCreate] FS #${event.ticketId} → Jira | ` +
+      `🚀 [processCreate][${cfg.slug}] FS #${event.ticketId} → Jira | ` +
       `"${event.subject}" | Priority: ${event.fsPriority}→${priorityName}`,
     );
 
     try {
       const jiraIssue = await this.jiraService.createIssue({
-        summary:     `[FS-${event.ticketId}] ${event.subject}`,
+        summary:     event.subject,
         description: event.description,
         priority:    priorityName,
-      });
+      }, cfg);
 
       await this.ticketMappingModel.create({
+        customerId:            cfg.customerId,
         jiraIssueKey:          jiraIssue.key,
         jiraIssueId:           jiraIssue.id,
         freshserviceTicketId:  event.ticketId,
@@ -628,17 +582,19 @@ export class SyncService {
       });
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'ticket_created', source: 'freshservice', destination: 'jira',
         jiraIssueId: jiraIssue.id, jiraIssueKey: jiraIssue.key,
         freshserviceTicketId: event.ticketId, status: 'success',
         sentPayload: { summary: `[FS-${event.ticketId}] ${event.subject}`, priority: priorityName },
       });
 
-      this.logger.log(`✅ [processCreate] FS #${event.ticketId} → Jira ${jiraIssue.key} CREATED`);
+      this.logger.log(`✅ [processCreate][${cfg.slug}] FS #${event.ticketId} → Jira ${jiraIssue.key} CREATED`);
       return { status: 'success', message: `Jira ${jiraIssue.key} created for FS #${event.ticketId}` };
 
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'ticket_created', source: 'freshservice', destination: 'jira',
         freshserviceTicketId: event.ticketId, status: 'failed', errorMessage: err?.message,
         payloadSnapshot: rawPayload,
@@ -647,200 +603,151 @@ export class SyncService {
     }
   }
 
-  // ─── processUpdate ────────────────────────────────────────────
-  private async processUpdate(
+  // ─── handleFreshserviceUpdate ─────────────────────────────────
+  private async handleFreshserviceUpdate(
     event: { type: 'update'; ticketId: number; subject?: string; fsPriority?: number; fsStatus?: number; hasChanges: boolean },
     mapping: TicketMappingDocument,
     rawPayload: any,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
-    // ── Loop prevention ───────────────────────────────────────────
+    const ticketId = event.ticketId;
+    const jiraIssueKey = mapping.jiraIssueKey;
+
+    this.logger.log(`🔄 [handleFreshserviceUpdate][${cfg.slug}] FS #${ticketId} → Jira ${jiraIssueKey}`);
+
+    // STEP 1: ALWAYS fetch conversations first
+    const conversations = await this.freshserviceService.getConversations(ticketId, cfg);
+    this.logger.log(`🔍 [handleFreshserviceUpdate] Fetched ${conversations.length} conversations for FS #${ticketId}`);
+
+    // STEP 2: ALWAYS process new notes first
+    await this.processNotes(conversations, mapping, cfg);
+
+    // STEP 3: Then check field changes (Metadata Sync)
     if (mapping.lastUpdatedSource === 'freshservice') {
-      this.logger.warn(
-        `🔄 [processUpdate] Loop prevention: FS#${event.ticketId} last touched by Freshservice — skip`,
-      );
-      // Reset so next genuine Jira update can pass through
-      await this.ticketMappingModel.updateOne(
-        { freshserviceTicketId: event.ticketId },
-        { lastUpdatedSource: 'freshservice' },  // already freshservice, idempotent
-      );
-      return { status: 'skipped', message: 'Loop prevention triggered' };
+      this.logger.warn(`🔄 [handleFreshserviceUpdate][${cfg.slug}] Metadata loop prevention triggered`);
+      return { status: 'skipped', message: 'Metadata loop prevention triggered' };
     }
 
-    // ── Value comparison — skip if nothing changed ─────────────────
     if (!event.hasChanges) {
-      this.logger.log(`ℹ️  [processUpdate] No relevant field changes — skipping Jira update`);
-      return { status: 'skipped', message: 'No changes detected' };
+      this.logger.log(`ℹ️ [handleFreshserviceUpdate][${cfg.slug}] No field changes detected`);
+      return { status: 'skipped', message: 'No field changes' };
     }
 
-    const jiraIssueKey    = mapping.jiraIssueKey;
-    const newPriorityName = event.fsPriority != null
-      ? JiraService.PRIORITY_MAP[event.fsPriority]
-      : undefined;
-    const transitionTarget = event.fsStatus != null
-      ? JiraService.STATUS_NAME_MAP[event.fsStatus]
-      : undefined;
+    const newPriorityName = event.fsPriority != null ? JiraService.PRIORITY_MAP[event.fsPriority] : undefined;
+    const transitionTarget = event.fsStatus != null ? JiraService.STATUS_NAME_MAP[event.fsStatus] : undefined;
 
-    // Skip if values haven't actually changed vs what we have cached
     const priorityChanged = newPriorityName && newPriorityName !== mapping.jiraPriority;
-    const statusChanged   = event.fsStatus  && event.fsStatus  !== mapping.freshserviceStatus;
-    const subjectChanged  = event.subject   && event.subject   !== mapping.summary;
+    const statusChanged = event.fsStatus && event.fsStatus !== mapping.freshserviceStatus;
+    const subjectChanged = event.subject && event.subject !== mapping.summary;
 
     if (!priorityChanged && !statusChanged && !subjectChanged) {
-      this.logger.log(
-        `ℹ️  [processUpdate] Cached values match incoming — no API call needed ` +
-        `[priority: ${newPriorityName}, status: ${event.fsStatus}, subject unchanged]`,
-      );
-      return { status: 'skipped', message: 'Values unchanged (cached comparison)' };
+      this.logger.log(`ℹ️ [handleFreshserviceUpdate][${cfg.slug}] Metadata unchanged vs cache`);
+      return { status: 'skipped', message: 'Metadata unchanged' };
     }
 
     const updateData: any = {};
-    if (subjectChanged)  updateData.summary  = `[FS-${event.ticketId}] ${event.subject}`;
+    if (subjectChanged)  updateData.summary = event.subject;
     if (priorityChanged) updateData.priority = newPriorityName;
-
-    this.logger.log(
-      `📋 [processUpdate] Updating Jira ${jiraIssueKey} for FS #${event.ticketId} | ` +
-      `subject: ${subjectChanged ? '✓' : '-'} | ` +
-      `priority: ${priorityChanged ? `${mapping.jiraPriority}→${newPriorityName}` : '-'} | ` +
-      `status: ${statusChanged ? `${mapping.freshserviceStatus}→${event.fsStatus}` : '-'}`,
-    );
 
     try {
       if (Object.keys(updateData).length > 0) {
-        await this.jiraService.updateIssue(jiraIssueKey, updateData);
+        await this.jiraService.updateIssue(jiraIssueKey, updateData, cfg);
       }
       if (transitionTarget && statusChanged) {
-        await this.jiraService.transitionIssue(jiraIssueKey, transitionTarget);
+        await this.jiraService.transitionIssue(jiraIssueKey, transitionTarget, cfg);
       }
 
       await this.ticketMappingModel.updateOne(
-        { freshserviceTicketId: event.ticketId },
+        { customerId: cfg.customerId, freshserviceTicketId: ticketId },
         {
           lastUpdatedSource: 'freshservice',
           lastSyncedAt:      new Date(),
-          ...(statusChanged  && { freshserviceStatus:   event.fsStatus }),
+          ...(statusChanged   && { freshserviceStatus:   event.fsStatus }),
           ...(priorityChanged && { freshservicePriority: event.fsPriority, jiraPriority: newPriorityName }),
           ...(subjectChanged  && { summary: event.subject }),
         },
       );
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'ticket_updated', source: 'freshservice', destination: 'jira',
         jiraIssueId: mapping.jiraIssueId, jiraIssueKey,
-        freshserviceTicketId: event.ticketId, status: 'success',
+        freshserviceTicketId: ticketId, status: 'success',
         sentPayload: { ...updateData, transition: transitionTarget },
       });
 
-      this.logger.log(`✅ [processUpdate] FS #${event.ticketId} → Jira ${jiraIssueKey} UPDATED`);
-
-      // ── CONVERSATION FALLBACK CHECK ────────────────────────────────
-      // If the webhook didn't send a note but an email/reply WAS the reason for this update event
-      try {
-        const conversations = await this.freshserviceService.getConversations(event.ticketId);
-        if (conversations.length > 0) {
-          // Newest conversations are usually at the end, but let's be safe and sort
-          conversations.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-          const latestConv = conversations[0];
-          
-          let body = latestConv.body_text || latestConv.body || '';
-          
-          // Strip HTML manually for hash consistency if needed
-          body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          
-          if (body !== '') {
-            const hash = createHash('sha256').update(body).digest('hex');
-            
-            // Re-fetch mapping properly to ensure we have the absolute latest state
-            const currentMapping = await this.ticketMappingModel.findOne({ jiraIssueId: mapping.jiraIssueId });
-            
-            if (currentMapping && currentMapping.lastNoteHash !== hash) {
-              this.logger.log(`💬 [processUpdate] New conversation discovered via fallback fetch! (hash: ${hash})`);
-              const agentName = latestConv.from_email || 'Freshservice User';
-              
-              // We trigger the native note processor safely
-              await this.processNote({ type: 'note', ticketId: event.ticketId, body, agentName, hash }, currentMapping);
-            }
-          }
-        }
-      } catch (convErr) {
-        this.logger.warn(`⚠️  [processUpdate] Failed to run conversation fallback check: ${convErr?.message}`);
-      }
-
-      return { status: 'success', message: `Jira ${jiraIssueKey} updated` };
-
+      return { status: 'success', message: `Jira ${jiraIssueKey} fields updated` };
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'ticket_updated', source: 'freshservice', destination: 'jira',
-        freshserviceTicketId: event.ticketId, jiraIssueKey, status: 'failed',
+        freshserviceTicketId: ticketId, jiraIssueKey, status: 'failed',
         errorMessage: err?.message, payloadSnapshot: rawPayload,
       });
       throw err;
     }
   }
 
-  // ─── processNote ──────────────────────────────────────────────
-  private async processNote(
-    event: { type: 'note'; ticketId: number; body: string; agentName: string; hash: string },
-    mapping: TicketMappingDocument,
-  ): Promise<{ status: string; message: string }> {
-    // ── Duplicate note prevention ─────────────────────────────────
-    if (mapping.lastNoteHash === event.hash) {
-      this.logger.warn(
-        `🔁 [processNote] Duplicate note detected for FS #${event.ticketId} ` +
-        `(hash: ${event.hash.slice(0, 8)}...) — skipping`,
-      );
-      return { status: 'skipped', message: 'Duplicate note — already synced' };
+  // ─── processNotes ─────────────────────────────────────────────
+  private async processNotes(conversations: any[], mapping: TicketMappingDocument, cfg: CustomerConfig): Promise<void> {
+    if (!conversations || conversations.length === 0) return;
+
+    const ticketId = mapping.freshserviceTicketId;
+    const jiraIssueKey = mapping.jiraIssueKey;
+
+    const publicNotes = conversations.filter((conv) => conv.private === false);
+    publicNotes.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+    let latestProcessedId = mapping.lastNoteId || 0;
+    let newNotesCount = 0;
+
+    for (const note of publicNotes) {
+      if (note.id > latestProcessedId) {
+        let body = note.body_text || note.body || '';
+        body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+        if (!body) {
+          latestProcessedId = note.id;
+          continue;
+        }
+
+        const hash = createHash('sha256').update(body).digest('hex');
+        if (mapping.lastNoteHash === hash) {
+          latestProcessedId = note.id;
+          continue;
+        }
+
+        const agentName = note.from_email || note.user_id?.toString() || 'Freshservice User';
+        this.logger.log(`💬 [processNotes][${cfg.slug}] New note #${note.id} detected → Jira ${jiraIssueKey}`);
+
+        try {
+          await this.jiraService.addComment(jiraIssueKey, body, agentName, cfg);
+
+          latestProcessedId = note.id;
+          await this.ticketMappingModel.updateOne(
+            { customerId: cfg.customerId, jiraIssueKey },
+            { lastNoteId: latestProcessedId, lastNoteHash: hash }
+          );
+
+          await this.logSync({
+            customerId: cfg.customerId,
+            eventType: 'note_synced', source: 'freshservice', destination: 'jira',
+            jiraIssueId: mapping.jiraIssueId, jiraIssueKey,
+            freshserviceTicketId: ticketId, status: 'success',
+            sentPayload: { body: body.substring(0, 100), noteId: note.id },
+          });
+
+          newNotesCount++;
+        } catch (err) {
+          this.logger.error(`❌ [processNotes][${cfg.slug}] Failed to sync note #${note.id}: ${err?.message}`);
+        }
+      }
     }
 
-    // ── Loop prevention ───────────────────────────────────────────
-    if (mapping.lastUpdatedSource === 'freshservice') {
-      this.logger.warn(
-        `🔄 [processNote] Loop prevention for FS #${event.ticketId} — resetting source`,
-      );
-      await this.ticketMappingModel.updateOne(
-        { freshserviceTicketId: event.ticketId },
-        { lastUpdatedSource: 'freshservice' },
-      );
-      return { status: 'skipped', message: 'Note loop prevention' };
-    }
-
-    this.logger.log(
-      `💬 [processNote] "${event.agentName}" on FS #${event.ticketId} → Jira ${mapping.jiraIssueKey}`,
-    );
-
-    try {
-      await this.jiraService.addComment(
-        mapping.jiraIssueKey,
-        event.body,
-        event.agentName,
-      );
-
-      // Store hash to prevent reprocessing + mark source
-      await this.ticketMappingModel.updateOne(
-        { freshserviceTicketId: event.ticketId },
-        {
-          lastUpdatedSource: 'freshservice',
-          lastSyncedAt:      new Date(),
-          lastNoteHash:      event.hash,
-        },
-      );
-
-      await this.logSync({
-        eventType: 'note_synced', source: 'freshservice', destination: 'jira',
-        jiraIssueId: mapping.jiraIssueId, jiraIssueKey: mapping.jiraIssueKey,
-        freshserviceTicketId: event.ticketId, status: 'success',
-        sentPayload: { body: event.body.substring(0, 200), agentName: event.agentName },
-      });
-
-      this.logger.log(`✅ [processNote] Note synced → Jira ${mapping.jiraIssueKey}`);
-      return { status: 'success', message: 'Comment added to Jira' };
-
-    } catch (err) {
-      await this.logSync({
-        eventType: 'note_synced', source: 'freshservice', destination: 'jira',
-        freshserviceTicketId: event.ticketId, jiraIssueKey: mapping.jiraIssueKey,
-        status: 'failed', errorMessage: err?.message,
-      });
-      throw err;
+    if (newNotesCount > 0) {
+      this.logger.log(`✅ [processNotes][${cfg.slug}] Synced ${newNotesCount} new note(s) to Jira ${jiraIssueKey}`);
+    } else {
+      this.logger.log(`ℹ️ [processNotes][${cfg.slug}] No new notes for FS #${ticketId}`);
     }
   }
 
@@ -848,44 +755,39 @@ export class SyncService {
   private async processAttachment(
     event: { type: 'attachment'; ticketId: number; attachments: Array<{ name: string; attachment_url: string }> },
     mapping: TicketMappingDocument,
+    cfg: CustomerConfig,
   ): Promise<{ status: string; message: string }> {
     if (event.attachments.length === 0) {
-      this.logger.warn(`⚠️  [processAttachment] No valid attachments in payload for FS #${event.ticketId}`);
+      this.logger.warn(`⚠️  [processAttachment][${cfg.slug}] No valid attachments for FS #${event.ticketId}`);
       return { status: 'skipped', message: 'No attachments in payload' };
     }
 
     this.logger.log(
-      `📎 [processAttachment] FS #${event.ticketId} → Jira ${mapping.jiraIssueKey} | ` +
-      `${event.attachments.length} file(s): [${event.attachments.map((a) => a.name).join(', ')}]`,
+      `📎 [processAttachment][${cfg.slug}] FS #${event.ticketId} → Jira ${mapping.jiraIssueKey} | ` +
+      `${event.attachments.length} file(s)`,
     );
 
     try {
       const result = await this.jiraService.uploadAttachments(
         mapping.jiraIssueKey,
         event.attachments,
+        'Freshservice (via Sync)',
+        cfg,
       );
 
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'attachment_added', source: 'freshservice', destination: 'jira',
         jiraIssueId: mapping.jiraIssueId, jiraIssueKey: mapping.jiraIssueKey,
         freshserviceTicketId: event.ticketId, status: 'success',
-        sentPayload: {
-          files:    event.attachments.map((a) => a.name),
-          uploaded: result.uploaded,
-          fallback: result.fallback,
-        },
+        sentPayload: { files: event.attachments.map((a) => a.name), uploaded: result.uploaded, fallback: result.fallback },
       });
 
-      this.logger.log(
-        `✅ [processAttachment] Done — ${result.uploaded} uploaded, ${result.fallback} fallback`,
-      );
-      return {
-        status: 'success',
-        message: `${result.uploaded} uploaded to Jira, ${result.fallback} via link comment`,
-      };
+      return { status: 'success', message: `${result.uploaded} uploaded to Jira, ${result.fallback} via link comment` };
 
     } catch (err) {
       await this.logSync({
+        customerId: cfg.customerId,
         eventType: 'attachment_added', source: 'freshservice', destination: 'jira',
         freshserviceTicketId: event.ticketId, jiraIssueKey: mapping.jiraIssueKey,
         status: 'failed', errorMessage: err?.message,
@@ -900,8 +802,7 @@ export class SyncService {
 
   /**
    * extractJiraDescription()
-   * Handles both plain string descriptions and Jira's
-   * Atlassian Document Format (ADF) object recursively.
+   * Handles both plain string descriptions and Jira's ADF objects recursively.
    */
   private extractJiraDescription(rawDesc: any): string {
     if (!rawDesc) return 'No description provided.';
@@ -926,6 +827,7 @@ export class SyncService {
    * Write an audit log entry to MongoDB.
    */
   private async logSync(data: {
+    customerId?: string;
     eventType: string;
     source: string;
     destination: string;

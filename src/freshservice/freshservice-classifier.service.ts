@@ -125,32 +125,6 @@ export class FreshserviceClassifierService {
 
     // ── 2. ticket_updated ─────────────────────────────────────────
     if (eventType === 'ticket_updated') {
-      // Check for latest_note FIRST — this is the only way notes arrive
-      const latestNote = ticket?.latest_note ?? rawPayload?.latest_note;
-
-      if (latestNote?.body || latestNote?.body_text) {
-        const body = this.stripHtml(
-          latestNote.body_text ?? latestNote.body ?? '',
-        ).trim();
-
-        if (!body) {
-          this.logger.warn(`⚠️  [CLASSIFIER] latest_note body is empty — treating as update`);
-        } else {
-          const hash = createHash('sha256').update(body).digest('hex');
-          const agentName =
-            latestNote.agent?.name ??
-            latestNote.submitted_by ??
-            rawPayload?.agent?.name ??
-            'Freshservice Agent';
-
-          this.logger.log(
-            `💬 [CLASSIFIER] latest_note detected → treating as NOTE event (hash: ${hash.slice(0, 8)}...)`,
-          );
-
-          return { type: 'note', ticketId, body, agentName, hash };
-        }
-      }
-
       // Regular field update
       const subject = ticket?.subject ?? fw?.ticket_subject ?? rawPayload?.subject;
       

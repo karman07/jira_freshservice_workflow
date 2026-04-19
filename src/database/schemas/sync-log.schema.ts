@@ -8,9 +8,13 @@ export type SyncLogDocument = HydratedDocument<SyncLog>;
  * ───────
  * Every sync event (create, update, comment, status change, attachment)
  * is persisted here for auditing, debugging, and retry logic.
+ * Scoped per customer via customerId.
  */
 @Schema({ timestamps: true })
 export class SyncLog {
+  // Which customer (tenant) this log belongs to
+  @Prop({ index: true }) customerId: string;
+
   // "issue_created" | "issue_updated" | "comment_created" | "status_changed"
   // "priority_changed" | "attachment_added" | "ticket_created" | "ticket_updated"
   @Prop({ required: true }) eventType: string;
@@ -40,3 +44,4 @@ export class SyncLog {
 }
 
 export const SyncLogSchema = SchemaFactory.createForClass(SyncLog);
+

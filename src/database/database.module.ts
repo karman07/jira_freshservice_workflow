@@ -5,13 +5,15 @@ import {
   TicketMappingSchema,
 } from './schemas/ticket-mapping.schema';
 import { SyncLog, SyncLogSchema } from './schemas/sync-log.schema';
+import { Customer, CustomerSchema } from './schemas/customer.schema';
+import { Admin, AdminSchema } from './schemas/admin.schema';
 
 /**
  * DatabaseModule
  * ──────────────
  * Responsibility:
- *   - Register all Mongoose schemas (TicketMapping, SyncLog)
- *   - Export the models so other modules (SyncModule, etc.) can inject them
+ *   - Register all Mongoose schemas
+ *   - Export the models so other modules can inject them
  *
  * This keeps database concerns isolated from business logic.
  */
@@ -20,8 +22,10 @@ import { SyncLog, SyncLogSchema } from './schemas/sync-log.schema';
     MongooseModule.forFeature([
       { name: TicketMapping.name, schema: TicketMappingSchema },
       { name: SyncLog.name, schema: SyncLogSchema },
+      { name: Customer.name, schema: CustomerSchema },
+      { name: Admin.name, schema: AdminSchema },
     ]),
   ],
-  exports: [MongooseModule], // Export so SyncModule can use InjectModel()
+  exports: [MongooseModule],
 })
 export class DatabaseModule {}

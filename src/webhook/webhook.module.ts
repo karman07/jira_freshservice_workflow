@@ -1,19 +1,20 @@
 import { Module } from '@nestjs/common';
 import { WebhookController } from './webhook.controller';
 import { SyncModule } from '../sync/sync.module';
+import { AdminModule } from '../admin/admin.module';
+import { DatabaseModule } from '../database/database.module';
+import { CustomerConfigService } from '../admin/customer-config.service';
 
 /**
  * WebhookModule
  * ─────────────
- * Exposes:
- *   POST /api/webhook/jira           ← Jira automation webhook
- *   POST /api/webhook/freshservice   ← Freshservice automation webhook
- *
- * All business logic is delegated to SyncService (via SyncModule).
- * WebhookController is purely a routing + logging layer.
+ * Exposes per-customer and legacy webhook endpoints.
+ * Delegates sync logic to SyncService (via SyncModule).
+ * Uses CustomerConfigService to resolve per-tenant credentials.
  */
 @Module({
-  imports: [SyncModule], // SyncModule exports SyncService
+  imports: [SyncModule, AdminModule, DatabaseModule],
   controllers: [WebhookController],
+  providers: [CustomerConfigService],
 })
 export class WebhookModule {}

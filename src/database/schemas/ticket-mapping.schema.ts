@@ -7,13 +7,13 @@ export type TicketMappingDocument = HydratedDocument<TicketMapping>;
  * TicketMapping
  * ─────────────
  * Stores the permanent link between a Jira issue and a Freshservice ticket.
- * Used to:
- *   - Look up the counterpart ID when syncing updates
- *   - Detect which system last updated the record (loop prevention)
- *   - Track sync metadata for debugging
+ * Now scoped per customer (tenant) via customerId.
  */
 @Schema({ timestamps: true })
 export class TicketMapping {
+  // Which customer (tenant) this mapping belongs to
+  @Prop({ required: true, index: true }) customerId: string;
+
   // Jira issue key e.g. "SCRUM-42"
   @Prop({ required: true, index: true }) jiraIssueKey: string;
 
@@ -40,12 +40,16 @@ export class TicketMapping {
 
   // SHA-256 hash of the last synced note body — prevents duplicate note syncs
   @Prop() lastNoteHash: string;
+
+  // The numeric ID of the last conversation (note/reply) synced from Freshservice
+  @Prop() lastNoteId: number;
 }
 
 export const TicketMappingSchema = SchemaFactory.createForClass(TicketMapping);
 
-// Compound unique index — each Jira issue maps to exactly one FS ticket
+// Compound unique index — each Jira issue maps to exactly one FS ticket PER customer
 TicketMappingSchema.index(
-  { jiraIssueId: 1, freshserviceTicketId: 1 },
+  { customerId: 1, jiraIssueId: 1, freshserviceTicketId: 1 },
   { unique: true },
 );
+

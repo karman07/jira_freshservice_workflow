@@ -34,6 +34,12 @@ async function bootstrap() {
   // ── Global prefix: all routes will be /api/... ──────────────────
   app.setGlobalPrefix('api');
 
+  // ── Enable CORS for the Next.js admin dashboard ─────────────────
+  app.enableCors({
+    origin: process.env.FRONTEND_URL ?? 'http://localhost:3001',
+    credentials: true,
+  });
+
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
   console.log(`🚀 Jira-Freshservice Sync Server running on port ${port}`);
