@@ -17,6 +17,7 @@ import type { Customer, CreateCustomerPayload } from '@/lib/types';
 import { CustomerForm } from '@/components/customers/CustomerForm';
 import { WebhookPanel } from '@/components/customers/WebhookPanel';
 import { DangerZone } from '@/components/customers/DangerZone';
+import { FsPairPanel } from '@/components/customers/FsPairPanel';
 import { PageLoader } from '@/components/shared/LoadingSpinner';
 import { toast } from '@/components/shared/Toast';
 import { relativeTime } from '@/lib/utils';
@@ -167,6 +168,13 @@ export default function CustomerDetailPage() {
           <WebhookPanel
             jiraUrl={customer.webhookJiraUrl}
             freshserviceUrl={customer.webhookFreshserviceUrl}
+          />
+
+          {/* FS ↔ FS Pair Panel */}
+          <FsPairPanel
+            slug={slug}
+            webhookFsPairUrl={customer.webhookFsPairUrl}
+            fsPairEnabled={customer.fsPairEnabled}
           />
 
           {/* Mini stats */}

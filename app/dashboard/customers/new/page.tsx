@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -9,11 +9,18 @@ import type { CreateCustomerPayload } from '@/lib/types';
 import { CustomerForm } from '@/components/customers/CustomerForm';
 import { WebhookPanel } from '@/components/customers/WebhookPanel';
 import { toast } from '@/components/shared/Toast';
+import { PageLoader } from '@/components/shared/LoadingSpinner';
 
-export default function NewCustomerPage() {
+// Inner component that safely uses useSearchParams inside Suspense
+function NewCustomerContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const mode = (searchParams.get('mode') as 'jira' | 'freshservice') ?? 'jira';
+
   const [slugError, setSlugError] = useState<string | undefined>();
-  const [created, setCreated] = useState<{ slug: string; jiraUrl: string; fsUrl: string } | null>(null);
+  const [created, setCreated] = useState<{ slug: string; jiraUrl: string; fsUrl: string } | null>(
+    null
+  );
 
   async function handleSubmit(data: CreateCustomerPayload) {
     setSlugError(undefined);
@@ -34,6 +41,8 @@ export default function NewCustomerPage() {
     }, 3000);
   }
 
+  const isFreshserviceOnly = mode === 'freshservice';
+
   return (
     <div className="space-y-6 pb-6 max-w-2xl">
       {/* Header */}
@@ -45,11 +54,26 @@ export default function NewCustomerPage() {
           <ArrowLeft className="w-4 h-4" />
         </Link>
         <div>
-          <h1 className="text-2xl font-bold text-[var(--text)]">New Customer</h1>
+          <h1 className="text-2xl font-bold text-[var(--text)]">
+            {isFreshserviceOnly ? 'New Freshservice Customer' : 'New Jira Customer'}
+          </h1>
           <p className="text-sm text-[var(--muted)] mt-0.5">
-            Create a new sync tenant configuration
+            {isFreshserviceOnly
+              ? 'Configure a Freshservice ↔ Freshservice sync tenant'
+              : 'Configure a Jira ↔ Freshservice sync tenant'}
           </p>
         </div>
+
+        {/* Mode badge */}
+        <span
+          className={`ml-auto flex-shrink-0 px-3 py-1 rounded-full text-xs font-semibold border ${
+            isFreshserviceOnly
+              ? 'bg-green-500/10 text-green-400 border-green-500/25'
+              : 'bg-blue-500/10 text-blue-400 border-blue-500/25'
+          }`}
+        >
+          {isFreshserviceOnly ? 'Freshservice Only' : 'Jira + Freshservice'}
+        </span>
       </div>
 
       {/* Success banner with webhook URLs */}
@@ -67,8 +91,17 @@ export default function NewCustomerPage() {
           onSubmit={handleSubmit}
           submitLabel="Create Customer"
           slugError={slugError}
+          mode={mode}
         />
       </div>
     </div>
+  );
+}
+
+export default function NewCustomerPage() {
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <NewCustomerContent />
+    </Suspense>
   );
 }

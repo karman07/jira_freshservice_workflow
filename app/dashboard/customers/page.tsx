@@ -10,6 +10,7 @@ import { Modal } from '@/components/shared/Modal';
 import { PageLoader } from '@/components/shared/LoadingSpinner';
 import { toast } from '@/components/shared/Toast';
 import { useRouter } from 'next/navigation';
+import { IntegrationPickerModal } from '@/components/customers/IntegrationPickerModal';
 
 export default function CustomersPage() {
   const router = useRouter();
@@ -18,6 +19,7 @@ export default function CustomersPage() {
   const [search, setSearch] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   async function load() {
     try {
@@ -79,14 +81,14 @@ export default function CustomersPage() {
             {customers.length} tenant{customers.length !== 1 ? 's' : ''} configured
           </p>
         </div>
-        <Link
-          href="/dashboard/customers/new"
+        <button
           id="new-customer-button"
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--primary)] hover:bg-[#2563eb] text-white font-medium text-sm transition-all duration-200"
+          onClick={() => setPickerOpen(true)}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--primary)] hover:bg-[#2563eb] text-white font-medium text-sm transition-all duration-200 hover:-translate-y-px active:scale-[0.97]"
         >
           <Plus className="w-4 h-4" />
           New Customer
-        </Link>
+        </button>
       </div>
 
       {/* Search */}
@@ -142,6 +144,11 @@ export default function CustomersPage() {
             : ''
         }
         confirmLabel="Delete Forever"
+      />
+
+      <IntegrationPickerModal
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
       />
     </div>
   );

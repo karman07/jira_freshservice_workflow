@@ -10,11 +10,17 @@ export interface Customer {
   jiraApiToken: string;
   jiraProjectKey: string;
 
-  // Freshservice (optional)
+  // Freshservice Instance A (optional)
   freshserviceBaseUrl?: string;
   freshserviceApiKey?: string;
   fsCustomStatusAwaiting?: string;
   fallbackEmail?: string;
+
+  // Freshservice Instance B — FS↔FS pairing
+  fsPairEnabled?: boolean;
+  fs2BaseUrl?: string;
+  fs2ApiKey?: string;
+  fs2FallbackEmail?: string;
 
   isActive: boolean;
   totalSyncs: number;
@@ -24,6 +30,7 @@ export interface Customer {
 
   webhookJiraUrl: string;
   webhookFreshserviceUrl: string;
+  webhookFsPairUrl?: string;
 
   createdAt: string;
   updatedAt: string;
@@ -108,4 +115,28 @@ export interface CreateCustomerPayload {
   freshserviceApiKey?: string;
   fsCustomStatusAwaiting?: string;
   fallbackEmail?: string;
+  // Freshservice Instance B
+  fsPairEnabled?: boolean;
+  fs2BaseUrl?: string;
+  fs2ApiKey?: string;
+  fs2FallbackEmail?: string;
+}
+
+/** A single FS↔FS mirrored ticket pair */
+export interface FsPairMapping {
+  _id: string;
+  customerId: string;
+  instanceATicketId: number;
+  instanceBTicketId: number;
+  lastUpdatedSource: 'instanceA' | 'instanceB';
+  lastSyncedAt: string;
+  subject?: string;
+  instanceAStatus?: number;
+  instanceBStatus?: number;
+}
+
+/** Extended customer analytics including FS-pair stats */
+export interface FsPairStats {
+  total: number;
+  recent: FsPairMapping[];
 }

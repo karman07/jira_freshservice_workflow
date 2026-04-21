@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import type { Customer, CreateCustomerPayload } from '@/lib/types';
 import { slugify } from '@/lib/utils';
-import { Eye, EyeOff, ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { Eye, EyeOff, ChevronDown, ChevronRight, Info, ArrowLeftRight, ToggleLeft, ToggleRight } from 'lucide-react';
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner';
 
 interface CustomerFormProps {
@@ -11,6 +11,8 @@ interface CustomerFormProps {
   onSubmit: (data: CreateCustomerPayload) => Promise<void>;
   submitLabel?: string;
   slugError?: string;
+  /** 'jira' = Jira+FS sync (default); 'freshservice' = FS-only / FS↔FS */
+  mode?: 'jira' | 'freshservice';
 }
 
 interface FieldProps {
@@ -73,9 +75,14 @@ export function CustomerForm({
   onSubmit,
   submitLabel = 'Save',
   slugError,
+  mode = 'jira',
 }: CustomerFormProps) {
+  const isFsOnly = mode === 'freshservice';
   const [loading, setLoading] = useState(false);
   const [fsExpanded, setFsExpanded] = useState(false);
+  const [fsPairExpanded, setFsPairExpanded] = useState(
+    !!(initialData?.fsPairEnabled || initialData?.fs2BaseUrl)
+  );
 
   // Basic info
   const [name, setName] = useState(initialData?.name ?? '');
@@ -89,11 +96,17 @@ export function CustomerForm({
   const [jiraApiToken, setJiraApiToken] = useState(initialData?.jiraApiToken ?? '');
   const [jiraProjectKey, setJiraProjectKey] = useState(initialData?.jiraProjectKey ?? '');
 
-  // Freshservice
+  // Freshservice Instance A
   const [fsBaseUrl, setFsBaseUrl] = useState(initialData?.freshserviceBaseUrl ?? '');
   const [fsApiKey, setFsApiKey] = useState(initialData?.freshserviceApiKey ?? '');
   const [fsCustomStatus, setFsCustomStatus] = useState(initialData?.fsCustomStatusAwaiting ?? '');
   const [fallbackEmail, setFallbackEmail] = useState(initialData?.fallbackEmail ?? '');
+
+  // Freshservice Instance B (FS pairing)
+  const [fsPairEnabled, setFsPairEnabled] = useState(initialData?.fsPairEnabled ?? false);
+  const [fs2BaseUrl, setFs2BaseUrl] = useState(initialData?.fs2BaseUrl ?? '');
+  const [fs2ApiKey, setFs2ApiKey] = useState(initialData?.fs2ApiKey ?? '');
+  const [fs2FallbackEmail, setFs2FallbackEmail] = useState(initialData?.fs2FallbackEmail ?? '');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -108,10 +121,15 @@ export function CustomerForm({
     if (!name.trim()) e.name = 'Name is required';
     if (!slug.trim()) e.slug = 'Slug is required';
     if (!/^[a-z0-9-]+$/.test(slug)) e.slug = 'Only lowercase letters, numbers, and hyphens';
-    if (!jiraBaseUrl.trim()) e.jiraBaseUrl = 'Jira Base URL is required';
-    if (!jiraEmail.trim()) e.jiraEmail = 'Jira Email is required';
-    if (!jiraApiToken.trim()) e.jiraApiToken = 'Jira API Token is required';
-    if (!jiraProjectKey.trim()) e.jiraProjectKey = 'Jira Project Key is required';
+    if (!isFsOnly) {
+      if (!jiraBaseUrl.trim()) e.jiraBaseUrl = 'Jira Base URL is required';
+      if (!jiraEmail.trim()) e.jiraEmail = 'Jira Email is required';
+      if (!jiraApiToken.trim()) e.jiraApiToken = 'Jira API Token is required';
+      if (!jiraProjectKey.trim()) e.jiraProjectKey = 'Jira Project Key is required';
+    } else {
+      if (!fsBaseUrl.trim()) e.fsBaseUrl = 'Freshservice Base URL is required';
+      if (!fsApiKey.trim()) e.fsApiKey = 'Freshservice API Key is required';
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -133,6 +151,11 @@ export function CustomerForm({
         freshserviceApiKey: fsApiKey || undefined,
         fsCustomStatusAwaiting: fsCustomStatus || undefined,
         fallbackEmail: fallbackEmail || undefined,
+        // FS Instance B
+        fsPairEnabled,
+        fs2BaseUrl: fs2BaseUrl || undefined,
+        fs2ApiKey: fs2ApiKey || undefined,
+        fs2FallbackEmail: fs2FallbackEmail || undefined,
       });
     } finally {
       setLoading(false);
@@ -195,7 +218,8 @@ export function CustomerForm({
         </div>
       </section>
 
-      {/* ── Jira ── */}
+      {/* ── Jira (hidden in freshservice-only mode) ── */}
+      {!isFsOnly && (
       <section>
         <h3 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4 pb-2 border-b border-[var(--border)]">
           Jira Configuration
@@ -240,35 +264,49 @@ export function CustomerForm({
           </Field>
         </div>
       </section>
+      )}
 
-      {/* ── Freshservice (collapsible) ── */}
+      {/* ── Freshservice Instance A ── */}
+      {/* In freshservice-only mode this section is promoted as Required; in jira mode it's collapsible/optional */}
       <section>
         <button
           type="button"
-          onClick={() => setFsExpanded((v) => !v)}
-          className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4 pb-2 border-b border-[var(--border)] w-full hover:text-[var(--text)] transition-colors"
+          onClick={() => !isFsOnly && setFsExpanded((v) => !v)}
+          className={`flex items-center gap-2 text-xs font-semibold uppercase tracking-wider mb-4 pb-2 border-b border-[var(--border)] w-full transition-colors ${
+            isFsOnly
+              ? 'text-[var(--text)] cursor-default'
+              : 'text-[var(--muted)] hover:text-[var(--text)]'
+          }`}
         >
-          {fsExpanded ? (
-            <ChevronDown className="w-4 h-4" />
-          ) : (
-            <ChevronRight className="w-4 h-4" />
+          {!isFsOnly && (
+            (fsExpanded ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            ))
           )}
-          Freshservice Configuration
-          <span className="ml-1 text-[var(--muted)] text-[10px] normal-case font-normal">
-            Optional
-          </span>
+          Freshservice Instance A — Primary
+          {isFsOnly ? (
+            <span className="ml-2 text-red-400 text-[10px] normal-case">Required</span>
+          ) : (
+            <span className="ml-1 text-[var(--muted)] text-[10px] normal-case font-normal">
+              Optional (uses global env defaults)
+            </span>
+          )}
         </button>
 
-        {fsExpanded && (
+        {(isFsOnly || fsExpanded) && (
           <div className="space-y-4">
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
-              <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
-              <p className="text-xs text-blue-300 leading-relaxed">
-                If left blank, the system will use the global default Freshservice
-                credentials configured in the server environment.
-              </p>
-            </div>
-            <Field label="Freshservice Base URL">
+            {!isFsOnly && (
+              <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
+                <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
+                <p className="text-xs text-blue-300 leading-relaxed">
+                  If left blank, the system will use the global default Freshservice
+                  credentials configured in the server environment.
+                </p>
+              </div>
+            )}
+            <Field label="Freshservice Base URL" required={isFsOnly} error={errors.fsBaseUrl}>
               <input
                 type="url"
                 value={fsBaseUrl}
@@ -277,7 +315,7 @@ export function CustomerForm({
                 className={inputCls('fsBaseUrl')}
               />
             </Field>
-            <Field label="Freshservice API Key">
+            <Field label="Freshservice API Key" required={isFsOnly} error={errors.fsApiKey}>
               <SecretInput value={fsApiKey} onChange={setFsApiKey} placeholder="API Key..." />
             </Field>
             <div className="grid grid-cols-2 gap-4">
@@ -300,6 +338,100 @@ export function CustomerForm({
                 />
               </Field>
             </div>
+          </div>
+        )}
+      </section>
+
+      {/* ── Freshservice Instance B (FS Pairing) ── */}
+      <section>
+        <button
+          type="button"
+          onClick={() => setFsPairExpanded((v) => !v)}
+          className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4 pb-2 border-b border-[var(--border)] w-full hover:text-[var(--text)] transition-colors"
+        >
+          {fsPairExpanded ? (
+            <ChevronDown className="w-4 h-4" />
+          ) : (
+            <ChevronRight className="w-4 h-4" />
+          )}
+          <ArrowLeftRight className="w-3.5 h-3.5" />
+          Freshservice Pairing — Instance B
+          <span className="ml-1 text-[var(--muted)] text-[10px] normal-case font-normal">
+            {fsPairEnabled ? (
+              <span className="text-green-400 font-semibold">Enabled</span>
+            ) : 'Optional'}
+          </span>
+        </button>
+
+        {fsPairExpanded && (
+          <div className="space-y-4">
+            {/* Enable toggle */}
+            <div className="flex items-center justify-between p-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)]">
+              <div>
+                <p className="text-sm font-medium text-[var(--text)]">Enable FS ↔ FS Bi-directional Sync</p>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  When on, tickets created in either instance are automatically mirrored to the other.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFsPairEnabled((v) => !v)}
+                className="flex-shrink-0 transition-colors"
+                aria-label="Toggle FS pair sync"
+              >
+                {fsPairEnabled ? (
+                  <ToggleRight className="w-8 h-8 text-green-400" />
+                ) : (
+                  <ToggleLeft className="w-8 h-8 text-[var(--muted)]" />
+                )}
+              </button>
+            </div>
+
+            {fsPairEnabled && (
+              <>
+                <div className="flex items-start gap-2 p-3 rounded-xl bg-purple-500/5 border border-purple-500/20">
+                  <ArrowLeftRight className="w-4 h-4 text-purple-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs text-purple-300 leading-relaxed">
+                    Configure the second Freshservice instance. After saving, two webhook URLs
+                    will appear in the FS ↔ FS Pairing panel — add each to the corresponding
+                    Freshservice Automation Rule.
+                  </p>
+                </div>
+
+                <Field label="Instance B Base URL" required error={errors.fs2BaseUrl}
+                  hint="e.g. https://partner.freshservice.com">
+                  <input
+                    type="url"
+                    value={fs2BaseUrl}
+                    onChange={(e) => setFs2BaseUrl(e.target.value)}
+                    placeholder="https://partner.freshservice.com"
+                    className={inputCls('fs2BaseUrl')}
+                  />
+                </Field>
+
+                <Field label="Instance B API Key" required error={errors.fs2ApiKey}>
+                  <SecretInput
+                    value={fs2ApiKey}
+                    onChange={setFs2ApiKey}
+                    placeholder="Instance B API key..."
+                    id="fs2ApiKey"
+                  />
+                </Field>
+
+                <Field
+                  label="Instance B Fallback Email"
+                  hint="Used as the requester when creating mirror tickets in Instance B"
+                >
+                  <input
+                    type="email"
+                    value={fs2FallbackEmail}
+                    onChange={(e) => setFs2FallbackEmail(e.target.value)}
+                    placeholder="support@partner.com"
+                    className={inputCls('fs2FallbackEmail')}
+                  />
+                </Field>
+              </>
+            )}
           </div>
         )}
       </section>

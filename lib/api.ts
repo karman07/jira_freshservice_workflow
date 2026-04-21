@@ -3,6 +3,7 @@ import type {
   Customer,
   CreateCustomerPayload,
   CustomerAnalyticsResponse,
+  FsPairStats,
 } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -79,4 +80,8 @@ export const api = {
 
   getCustomerAnalytics: (slug: string) =>
     req<CustomerAnalyticsResponse>(`/admin/customers/${slug}/analytics`),
+
+  /** Fetch FS↔FS pair mapping stats for a customer */
+  getFsPairStats: (slug: string) =>
+    req<FsPairStats>(`/admin/customers/${slug}/fs-pair-stats`),
 };
