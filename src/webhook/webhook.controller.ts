@@ -8,11 +8,13 @@ import {
   Logger,
   Req,
   Param,
+  Query,
   Get,
   Res,
 } from '@nestjs/common';
 import { SyncService } from '../sync/sync.service';
 import { CustomerConfigService } from '../admin/customer-config.service';
+import { FsPairSyncService } from '../freshservice/fs-pair-sync.service';
 import { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -40,6 +42,7 @@ export class WebhookController {
   constructor(
     private readonly syncService: SyncService,
     private readonly customerConfigService: CustomerConfigService,
+    private readonly fsPairSyncService: FsPairSyncService,
   ) {}
 
   // ─────────────────────────────────────────────────────────────
@@ -118,6 +121,65 @@ export class WebhookController {
       return { received: true, customer: customerSlug, ...result };
     } catch (err) {
       this.logger.error(`❌ [FS][${customerSlug}] Error: ${err?.message}`);
+      await this.customerConfigService.recordSyncResult(customerSlug, false).catch(() => {});
+      return { received: true, customer: customerSlug, status: 'error', error: err?.message };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // POST /api/webhook/freshservice-pair/:customerSlug
+  //
+  // Called by the Freshservice Automation Rule on EACH instance.
+  // Use the ?origin= query param to identify the calling instance:
+  //   ?origin=instanceA  ← default, Instance A is calling
+  //   ?origin=instanceB  ← Instance B is calling
+  //
+  // This single endpoint handles both directions so you only need
+  // one webhook URL base per customer.
+  // ─────────────────────────────────────────────────────────────
+  @Post('freshservice-pair/:customerSlug')
+  @HttpCode(HttpStatus.OK)
+  async handleFsPairWebhook(
+    @Param('customerSlug') customerSlug: string,
+    @Query('origin') origin: string,
+    @Body() payload: any,
+    @Req() req: Request & { rawBody?: string },
+  ) {
+    this.logger.debug(`\n--- FS-PAIR RAW [${customerSlug}][${origin ?? 'instanceA'}] ---\n${req.rawBody}\n---`);
+
+    if (!payload || Object.keys(payload).length === 0) {
+      this.logger.warn(`⚠️  [FS-PAIR][${customerSlug}] Empty payload — ignoring`);
+      return { received: true, status: 'ignored', reason: 'empty payload' };
+    }
+
+    if (typeof payload === 'object') {
+      payload = this.rescueMalformedPayload(payload, req.rawBody);
+    }
+
+    const normalizedOrigin: 'instanceA' | 'instanceB' =
+      origin === 'instanceB' ? 'instanceB' : 'instanceA';
+
+    const rawTicketId =
+      payload?.ticket_id ?? payload?.ticket?.id ?? payload?.freshdesk_webhook?.ticket_id ?? 'n/a';
+
+    this.logger.log(
+      `\n${'═'.repeat(60)}\n` +
+      `📥 [FS-PAIR][${customerSlug}][${normalizedOrigin}] Ticket: ${rawTicketId}\n` +
+      `${'═'.repeat(60)}`,
+    );
+
+    try {
+      const customerConfig = await this.customerConfigService.resolveBySlug(customerSlug);
+      const result = await this.fsPairSyncService.handleFsPairEvent(
+        payload,
+        normalizedOrigin,
+        customerConfig,
+      );
+      await this.customerConfigService.recordSyncResult(customerSlug, result.status === 'success');
+      this.logger.log(`📤 [FS-PAIR][${customerSlug}] Done — ${result.status} | ${result.message}`);
+      return { received: true, customer: customerSlug, origin: normalizedOrigin, ...result };
+    } catch (err) {
+      this.logger.error(`❌ [FS-PAIR][${customerSlug}] Error: ${err?.message}`);
       await this.customerConfigService.recordSyncResult(customerSlug, false).catch(() => {});
       return { received: true, customer: customerSlug, status: 'error', error: err?.message };
     }
@@ -209,6 +271,11 @@ export class WebhookController {
       freshserviceApiKey:  process.env.FRESHSERVICE_API_KEY ?? '',
       fsCustomStatusAwaiting: process.env.FS_CUSTOM_STATUS_AWAITING ?? '',
       fallbackEmail: process.env.FALLBACK_EMAIL ?? '',
+      // FS pairing — disabled for legacy mode
+      fsPairEnabled: false,
+      fs2BaseUrl:    process.env.FS2_BASE_URL ?? '',
+      fs2ApiKey:     process.env.FS2_API_KEY ?? '',
+      fs2FallbackEmail: process.env.FS2_FALLBACK_EMAIL ?? process.env.FALLBACK_EMAIL ?? '',
     };
   }
 

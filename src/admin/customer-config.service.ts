@@ -21,11 +21,17 @@ export interface CustomerConfig {
   jiraApiToken: string;
   jiraProjectKey: string;
 
-  // Freshservice
+  // Freshservice Instance A
   freshserviceBaseUrl: string;
   freshserviceApiKey: string;
   fsCustomStatusAwaiting: string;
   fallbackEmail: string;
+
+  // Freshservice Instance B (FS↔FS pairing — optional)
+  fsPairEnabled: boolean;
+  fs2BaseUrl: string;
+  fs2ApiKey: string;
+  fs2FallbackEmail: string;
 }
 
 /**
@@ -102,16 +108,23 @@ export class CustomerConfigService {
       jiraApiToken:    customer.jiraApiToken,
       jiraProjectKey:  customer.jiraProjectKey,
 
-      // Freshservice — fall back to global env if not set
+      // Freshservice Instance A — fall back to global env if not set
       freshserviceBaseUrl: customer.freshserviceBaseUrl || globalFsUrl,
       freshserviceApiKey:  customer.freshserviceApiKey  || globalFsKey,
       fsCustomStatusAwaiting: customer.fsCustomStatusAwaiting || globalFsCustomStatus,
       fallbackEmail:   customer.fallbackEmail || globalFallback,
+
+      // Freshservice Instance B (FS↔FS pairing)
+      fsPairEnabled:   customer.fsPairEnabled ?? false,
+      fs2BaseUrl:      customer.fs2BaseUrl ?? '',
+      fs2ApiKey:       customer.fs2ApiKey ?? '',
+      fs2FallbackEmail: customer.fs2FallbackEmail || globalFallback,
     };
 
     this.logger.debug(
       `🏢 [Config] Resolved for "${customer.slug}": ` +
-      `Jira=${config.jiraBaseUrl} | FS=${config.freshserviceBaseUrl}`,
+      `Jira=${config.jiraBaseUrl} | FS-A=${config.freshserviceBaseUrl} | ` +
+      `FS-B=${config.fs2BaseUrl || '(global)'} | PairEnabled=${config.fsPairEnabled}`,
     );
 
     return config;

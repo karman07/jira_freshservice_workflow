@@ -30,7 +30,7 @@ export class Customer {
   @Prop({ required: true }) jiraApiToken: string;
   @Prop({ required: true }) jiraProjectKey: string;
 
-  // ── Freshservice credentials (optional — uses .env defaults if blank) ──
+  // ── Freshservice Instance A credentials (optional — uses .env defaults if blank) ──
   @Prop() freshserviceBaseUrl: string;
   @Prop() freshserviceApiKey: string;
 
@@ -39,6 +39,19 @@ export class Customer {
 
   // Fallback requester email for FS tickets when reporter has no email
   @Prop() fallbackEmail: string;
+
+  // ── Freshservice Instance B (second FS instance for FS↔FS pairing) ──────
+  /** When true, tickets created in either FS instance are mirrored to the other */
+  @Prop({ default: false }) fsPairEnabled: boolean;
+
+  /** Base URL of the second Freshservice instance e.g. https://partner.freshservice.com */
+  @Prop() fs2BaseUrl: string;
+
+  /** API key for the second Freshservice instance */
+  @Prop() fs2ApiKey: string;
+
+  /** Fallback requester email used when creating mirror tickets in Instance B */
+  @Prop() fs2FallbackEmail: string;
 
   // ── Instance health / sync stats ─────────────────────────────
   // Whether this customer instance is actively processing webhooks
@@ -55,6 +68,9 @@ export class Customer {
   // Webhook URLs shown to the customer after creation
   @Prop() webhookJiraUrl: string;
   @Prop() webhookFreshserviceUrl: string;
+
+  /** Dedicated FS↔FS webhook URL for the second Freshservice instance */
+  @Prop() webhookFsPairUrl: string;
 }
 
 export const CustomerSchema = SchemaFactory.createForClass(Customer);

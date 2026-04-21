@@ -14,6 +14,7 @@ import * as bcrypt from 'bcryptjs';
 import { Admin, AdminDocument } from '../database/schemas/admin.schema';
 import { Customer, CustomerDocument } from '../database/schemas/customer.schema';
 import { SyncLog, SyncLogDocument } from '../database/schemas/sync-log.schema';
+import { FsPairMapping, FsPairMappingDocument } from '../database/schemas/fs-pair-mapping.schema';
 import { LoginDto, CreateCustomerDto, UpdateCustomerDto } from './admin.dto';
 
 @Injectable()
@@ -24,6 +25,7 @@ export class AdminService implements OnModuleInit {
     @InjectModel(Admin.name) private readonly adminModel: Model<AdminDocument>,
     @InjectModel(Customer.name) private readonly customerModel: Model<CustomerDocument>,
     @InjectModel(SyncLog.name) private readonly syncLogModel: Model<SyncLogDocument>,
+    @InjectModel(FsPairMapping.name) private readonly fsPairModel: Model<FsPairMappingDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
   ) {}
@@ -75,11 +77,13 @@ export class AdminService implements OnModuleInit {
     // Build webhook URLs
     const webhookJiraUrl = `${baseUrl}/api/webhook/jira/${dto.slug}`;
     const webhookFreshserviceUrl = `${baseUrl}/api/webhook/freshservice/${dto.slug}`;
+    const webhookFsPairUrl = `${baseUrl}/api/webhook/freshservice-pair/${dto.slug}`;
 
     const customer = await this.customerModel.create({
       ...dto,
       webhookJiraUrl,
       webhookFreshserviceUrl,
+      webhookFsPairUrl,
     });
 
     this.logger.log(`✅ [Admin] Customer created: "${dto.name}" (slug: ${dto.slug})`);
@@ -227,5 +231,24 @@ export class AdminService implements OnModuleInit {
       dailyActivity,
       recentLogs,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // FS Pair Stats
+  // ─────────────────────────────────────────────────────────────
+
+  async getFsPairStats(slug: string) {
+    const customer = await this.customerModel.findOne({ slug });
+    if (!customer) throw new NotFoundException(`Customer "${slug}" not found`);
+
+    const customerId = customer._id.toString();
+    const total = await this.fsPairModel.countDocuments({ customerId });
+    const recent = await this.fsPairModel
+      .find({ customerId })
+      .sort({ lastSyncedAt: -1 })
+      .limit(10)
+      .lean();
+
+    return { total, recent };
   }
 }

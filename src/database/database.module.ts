@@ -7,6 +7,10 @@ import {
 import { SyncLog, SyncLogSchema } from './schemas/sync-log.schema';
 import { Customer, CustomerSchema } from './schemas/customer.schema';
 import { Admin, AdminSchema } from './schemas/admin.schema';
+import {
+  FsPairMapping,
+  FsPairMappingSchema,
+} from './schemas/fs-pair-mapping.schema';
 
 /**
  * DatabaseModule
@@ -24,6 +28,7 @@ import { Admin, AdminSchema } from './schemas/admin.schema';
       { name: SyncLog.name, schema: SyncLogSchema },
       { name: Customer.name, schema: CustomerSchema },
       { name: Admin.name, schema: AdminSchema },
+      { name: FsPairMapping.name, schema: FsPairMappingSchema },
     ]),
   ],
   exports: [MongooseModule],

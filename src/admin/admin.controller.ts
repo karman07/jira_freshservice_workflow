@@ -107,4 +107,10 @@ export class AdminController {
   async getCustomerAnalytics(@Param('slug') slug: string) {
     return this.adminService.getCustomerAnalytics(slug);
   }
+
+  @Get('customers/:slug/fs-pair-stats')
+  @UseGuards(JwtAuthGuard)
+  async getFsPairStats(@Param('slug') slug: string) {
+    return this.adminService.getFsPairStats(slug);
+  }
 }
