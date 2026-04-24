@@ -24,6 +24,15 @@ export class Customer {
   // Optional description / notes about this customer
   @Prop() description: string;
 
+  // ── Short Customer ID for subject-based routing ───────────────
+  /**
+   * A short human-readable ID (e.g. "CUST-42" or "dine3d").
+   * When a Freshservice ticket subject contains [<freshserviceCustomerId>],
+   * the system automatically strips it from the subject and routes the
+   * ticket to this customer's Jira. Highest priority routing method.
+   */
+  @Prop({ unique: true, sparse: true, index: true }) freshserviceCustomerId: string;
+
   // ── Jira credentials ──────────────────────────────────────────
   @Prop({ required: true }) jiraBaseUrl: string;
   @Prop({ required: true }) jiraEmail: string;
@@ -71,6 +80,20 @@ export class Customer {
 
   /** Dedicated FS↔FS webhook URL for the second Freshservice instance */
   @Prop() webhookFsPairUrl: string;
+
+  // ── Shared Freshservice Dispatcher Routing ─────────────────────
+  /**
+   * When using a single shared Freshservice account, tickets are routed
+   * to this customer if the ticket's company_id matches this value.
+   * Resolution priority: companyId > groupId > routingTag
+   */
+  @Prop({ index: true, sparse: true }) freshserviceCompanyId: string;
+
+  /** Optional: route to this customer if ticket.group_id matches */
+  @Prop() freshserviceGroupId: string;
+
+  /** Optional: route to this customer if ticket.tags[] includes this tag */
+  @Prop() freshserviceRoutingTag: string;
 }
 
 export const CustomerSchema = SchemaFactory.createForClass(Customer);

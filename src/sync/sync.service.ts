@@ -202,6 +202,7 @@ export class SyncService {
         jiraIssueKey,
         status: 'failed',
         errorMessage: err?.message,
+        errorCode: (err?.response?.status ?? err?.code ?? '').toString() || undefined,
         payloadSnapshot: payload,
       });
       throw err;
@@ -597,6 +598,7 @@ export class SyncService {
         customerId: cfg.customerId,
         eventType: 'ticket_created', source: 'freshservice', destination: 'jira',
         freshserviceTicketId: event.ticketId, status: 'failed', errorMessage: err?.message,
+        errorCode: (err?.response?.status ?? err?.code ?? '').toString() || undefined,
         payloadSnapshot: rawPayload,
       });
       throw err;
@@ -708,6 +710,18 @@ export class SyncService {
 
         if (!body) {
           latestProcessedId = note.id;
+          continue;
+        }
+
+        // Filter out automated time-tracking updates (e.g. "hour0 min1 total Minutes 1.0 support Minutes so far...")
+        const isTimeTracking = /support (minutes|hours) so far/i.test(body) || /Support (minutes|hours) remaining/i.test(body);
+        if (isTimeTracking) {
+          this.logger.log(`⏲️  [processNotes][${cfg.slug}] Skipping automated time-tracking note #${note.id}`);
+          latestProcessedId = note.id;
+          await this.ticketMappingModel.updateOne(
+            { customerId: cfg.customerId, jiraIssueKey },
+            { lastNoteId: latestProcessedId }
+          );
           continue;
         }
 
@@ -836,6 +850,7 @@ export class SyncService {
     freshserviceTicketId?: number;
     status: string;
     errorMessage?: string;
+    errorCode?: string;
     payloadSnapshot?: Record<string, any>;
     sentPayload?: Record<string, any>;
   }): Promise<void> {

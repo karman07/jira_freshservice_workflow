@@ -127,6 +127,104 @@ export class WebhookController {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // POST /api/webhook/freshservice-shared
+  //
+  // Shared Freshservice Dispatcher — ONE webhook URL for all customers.
+  // Freshservice fires this single endpoint; the server resolves WHICH
+  // customer owns this ticket via:
+  //   1. ticket.company_id  → Customer.freshserviceCompanyId
+  //   2. ticket.group_id    → Customer.freshserviceGroupId
+  //   3. ticket.tags[]      → Customer.freshserviceRoutingTag
+  //
+  // Race-around isolation: only the matched customer's Jira/FS is notified.
+  // All other customers are completely unaware of the ticket.
+  // ─────────────────────────────────────────────────────────────
+  @Post('freshservice-shared')
+  @HttpCode(HttpStatus.OK)
+  async handleSharedFreshserviceWebhook(
+    @Body() payload: any,
+    @Req() req: Request & { rawBody?: string },
+  ) {
+    this.logger.debug(`\n--- SHARED FS DISPATCHER RAW ---\n${req.rawBody}\n---`);
+
+    if (!payload || Object.keys(payload).length === 0) {
+      this.logger.warn('⚠️  [FS-SHARED] Empty payload — ignoring');
+      return { received: true, status: 'ignored', reason: 'empty payload' };
+    }
+
+    if (typeof payload === 'object') {
+      payload = this.rescueMalformedPayload(payload, req.rawBody);
+    }
+
+    // Extract routing identifiers from the ticket
+    const ticket = payload?.ticket ?? {};
+    const rawSubject: string = ticket.subject ?? ticket.name ?? payload?.subject ?? '';
+    const companyId  = ticket.company_id  ?? payload?.company_id;
+    const groupId    = ticket.group_id    ?? payload?.group_id;
+    const tags: string[] = ticket.tags    ?? payload?.tags ?? [];
+    const rawTicketId = ticket.id ?? payload?.ticket_id ?? 'n/a';
+
+    // ── Subject-based Customer ID extraction ───────────────────
+    // Pattern: "[CUST-42] Ticket subject" or "[dine3d] Ticket subject"
+    const subjectCustMatch = rawSubject.match(/^\[([^\]]+)\]\s*/);
+    const subjectCustomerId = subjectCustMatch ? subjectCustMatch[1] : undefined;
+    const cleanedSubject = subjectCustomerId
+      ? rawSubject.replace(/^\[[^\]]+\]\s*/, '').trim()
+      : rawSubject;
+
+    // Mutate payload to use the cleaned subject for downstream processing
+    if (subjectCustomerId && cleanedSubject && ticket.subject) {
+      payload = {
+        ...payload,
+        ticket: { ...ticket, subject: cleanedSubject },
+      };
+    }
+
+    this.logger.log(
+      `\n${'═'.repeat(60)}\n` +
+      `📥 [FS-SHARED] Ticket: ${rawTicketId} | Subject: "${rawSubject}"\n` +
+      `   SubjectCustId: ${subjectCustomerId ?? 'none'} | CompanyId: ${companyId ?? 'none'} | GroupId: ${groupId ?? 'none'} | Tags: [${tags.join(', ')}]\n` +
+      `${'═'.repeat(60)}`,
+    );
+
+    // Resolve which customer owns this ticket
+    const customerConfig = await this.customerConfigService.resolveBySharedFs({
+      subjectCustomerId,
+      companyId,
+      groupId,
+      tags,
+    });
+
+    if (!customerConfig) {
+      this.logger.warn(
+        `⚠️  [FS-SHARED] No customer matched for ticket #${rawTicketId}. ` +
+        `subjectCustId=${subjectCustomerId} companyId=${companyId} groupId=${groupId} tags=[${tags.join(',')}]. ` +
+        `Ticket silently dropped — other customers unaffected.`,
+      );
+      return {
+        received: true,
+        status: 'skipped',
+        reason: `No customer matched — tried subjectCustId=${subjectCustomerId} companyId=${companyId} groupId=${groupId} tags=[${tags.join(',')}]`,
+      };
+    }
+
+    this.logger.log(
+      `🎯 [FS-SHARED] Ticket #${rawTicketId} → Customer "${customerConfig.slug}" (isolated routing)`,
+    );
+
+    try {
+      const result = await this.syncService.handleFreshserviceEvent(payload, customerConfig);
+      await this.customerConfigService.recordSyncResult(customerConfig.slug, result.status === 'success');
+      this.logger.log(`📤 [FS-SHARED][${customerConfig.slug}] Done — ${result.status} | ${result.message}`);
+      return { received: true, customer: customerConfig.slug, routedVia: { subjectCustomerId, companyId, groupId, tags }, cleanedSubject, ...result };
+    } catch (err) {
+      this.logger.error(`❌ [FS-SHARED][${customerConfig.slug}] Error: ${err?.message}`);
+      await this.customerConfigService.recordSyncResult(customerConfig.slug, false).catch(() => {});
+      return { received: true, customer: customerConfig.slug, status: 'error', error: err?.message };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // POST /api/webhook/freshservice-pair/:customerSlug
   //
   // Called by the Freshservice Automation Rule on EACH instance.

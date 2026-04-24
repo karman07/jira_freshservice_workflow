@@ -36,6 +36,9 @@ export class SyncLog {
   // Human readable error (populated on failure)
   @Prop() errorMessage: string;
 
+  // HTTP status code or machine-readable error code (e.g. 401, 404, "ECONNREFUSED")
+  @Prop() errorCode: string;
+
   // Full incoming payload snapshot (trimmed to 10KB max)
   @Prop({ type: Object }) payloadSnapshot: Record<string, any>;
 

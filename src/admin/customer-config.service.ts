@@ -32,6 +32,14 @@ export interface CustomerConfig {
   fs2BaseUrl: string;
   fs2ApiKey: string;
   fs2FallbackEmail: string;
+
+  // Shared FS Dispatcher routing keys (for single-shared-FS multi-tenant mode)
+  freshserviceCompanyId?: string;
+  freshserviceGroupId?: string;
+  freshserviceRoutingTag?: string;
+
+  // Subject-based routing key (highest priority — extracted from "[CUST-X] subject")
+  freshserviceCustomerId?: string;
 }
 
 /**
@@ -119,6 +127,12 @@ export class CustomerConfigService {
       fs2BaseUrl:      customer.fs2BaseUrl ?? '',
       fs2ApiKey:       customer.fs2ApiKey ?? '',
       fs2FallbackEmail: customer.fs2FallbackEmail || globalFallback,
+
+      // Shared FS Dispatcher routing keys
+      freshserviceCompanyId:  customer.freshserviceCompanyId ?? undefined,
+      freshserviceGroupId:    customer.freshserviceGroupId ?? undefined,
+      freshserviceRoutingTag: customer.freshserviceRoutingTag ?? undefined,
+      freshserviceCustomerId: customer.freshserviceCustomerId ?? undefined,
     };
 
     this.logger.debug(
@@ -128,6 +142,69 @@ export class CustomerConfigService {
     );
 
     return config;
+  }
+
+  /**
+   * resolveBySharedFs()
+   * Used by the shared Freshservice dispatcher.
+   * Matches an incoming ticket to the correct customer using:
+   *   1. company_id  (most specific)
+   *   2. group_id    (fallback)
+   *   3. routingTag  (least specific)
+   */
+  async resolveBySharedFs(opts: {
+    subjectCustomerId?: string;
+    companyId?: string | number;
+    groupId?: string | number;
+    tags?: string[];
+  }): Promise<CustomerConfig | null> {
+    const { companyId, groupId, tags } = opts;
+    let customer: CustomerDocument | null = null;
+
+    // 0. Try subject-embedded customer ID (highest priority, e.g. "[CUST-42]" in subject)
+    if (opts.subjectCustomerId) {
+      customer = await this.customerModel.findOne({
+        freshserviceCustomerId: opts.subjectCustomerId,
+        isActive: true,
+      }).lean();
+      if (customer) {
+        this.logger.log(`🏷️  [SharedFS] Routed via subject CustomerID "${opts.subjectCustomerId}" → "${customer.slug}"`);
+      }
+    }
+
+    // 1. Try company_id first
+    if (companyId != null) {
+      customer = await this.customerModel.findOne({
+        freshserviceCompanyId: String(companyId),
+        isActive: true,
+      }).lean();
+    }
+
+    // 2. Try group_id
+    if (!customer && groupId != null) {
+      customer = await this.customerModel.findOne({
+        freshserviceGroupId: String(groupId),
+        isActive: true,
+      }).lean();
+    }
+
+    // 3. Try routing tags
+    if (!customer && tags && tags.length > 0) {
+      customer = await this.customerModel.findOne({
+        freshserviceRoutingTag: { $in: tags },
+        isActive: true,
+      }).lean();
+    }
+
+    if (!customer) {
+      this.logger.warn(
+        `⚠️  [SharedFS] No customer matched. companyId=${companyId} groupId=${groupId} tags=${tags?.join(',')}`,
+      );
+      return null;
+    }
+
+    this.logger.log(`🏷️  [SharedFS] Routed to customer "${customer.slug}" via shared FS dispatcher`);
+    return this.buildConfig(customer);
   }
 
   /**

@@ -71,7 +71,12 @@ export class AdminController {
   @Post('customers')
   @UseGuards(JwtAuthGuard)
   async createCustomer(@Body() dto: CreateCustomerDto, @Req() req: Request) {
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    // Vercel/proxies pass 'https' in x-forwarded-proto. Fallback to req.protocol for local dev.
+    const proto = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    // Force https if domain contains vercel.app or ngrok to be robust
+    const secureProto = (host?.includes('vercel.app') || host?.includes('ngrok.app') || host?.includes('ngrok-free.app')) ? 'https' : proto;
+    const baseUrl = `${secureProto}://${host}`;
     return this.adminService.createCustomer(dto, baseUrl);
   }
 
