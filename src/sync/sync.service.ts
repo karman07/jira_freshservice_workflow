@@ -140,6 +140,15 @@ export class SyncService {
       Number(FreshserviceService.STATUS_MAP[statusName]) || 2,
     ));
 
+    // ── Owner (assignee preferred, reporter as fallback) ──────────
+    const assigneeName   = fields?.assignee?.displayName ?? '';
+    const reporterName   = fields?.reporter?.displayName ?? '';
+    const ownerName      = assigneeName || reporterName || 'Unassigned';
+
+    // ── Project name / key ────────────────────────────────────────
+    const projectKey  = fields?.project?.key  ?? (jiraIssueKey.includes('-') ? jiraIssueKey.split('-')[0] : cfg.jiraProjectKey ?? '');
+    const projectName = fields?.project?.name ?? projectKey;
+
     const description = this.extractJiraDescription(fields?.description);
     const email =
       fields?.reporter?.emailAddress ??
@@ -147,19 +156,31 @@ export class SyncService {
       this.configService.get<string>('FALLBACK_EMAIL') ??
       'support@example.com';
 
+    // ── Build enriched description with owner + project metadata ──
+    const enrichedDescription =
+      `<p><strong>📌 Jira Project:</strong> ${projectName} (${projectKey})</p>` +
+      `<p><strong>👤 Owner / Assignee:</strong> ${ownerName}</p>` +
+      `<p><strong>🔗 Jira Issue:</strong> ${jiraIssueKey}</p>` +
+      `<hr/>` +
+      `<p>${description}</p>`;
+
+    // ── Subject: [Project] [JIRA-KEY] Summary ────────────────────
+    const fsSubject = `[${projectKey}] [JIRA-${jiraIssueKey}] ${summary}`;
+
     this.logger.log(
-      `📋 [SYNC][${cfg.slug}] Creating FS ticket for ${jiraIssueKey}: "${summary}" ` +
+      `📋 [SYNC][${cfg.slug}] Creating FS ticket for ${jiraIssueKey}: "${fsSubject}" ` +
+      `[Owner: ${ownerName}] [Project: ${projectName}] ` +
       `[Priority: ${priorityName}(${priority})] [Status: ${statusName}(${status})]`,
     );
 
     try {
       const fsTicket = await this.freshserviceService.createTicket({
-        subject: `[JIRA-${jiraIssueKey}] ${summary}`,
-        description,
+        subject: fsSubject,
+        description: enrichedDescription,
         priority,
         status,
         email,
-        tags: ['jira-sync', jiraIssueKey],
+        tags: ['jira-sync', jiraIssueKey, projectKey].filter(Boolean),
       }, cfg);
 
       await this.ticketMappingModel.create({
@@ -184,8 +205,8 @@ export class SyncService {
         jiraIssueKey,
         freshserviceTicketId: fsTicket.id,
         status: 'success',
-        payloadSnapshot: { summary, priority, status },
-        sentPayload: { subject: `[JIRA-${jiraIssueKey}] ${summary}`, priority, status },
+        payloadSnapshot: { summary, priority, status, owner: ownerName, project: projectName },
+        sentPayload: { subject: fsSubject, priority, status, owner: ownerName, project: projectKey },
       });
 
       this.logger.log(
