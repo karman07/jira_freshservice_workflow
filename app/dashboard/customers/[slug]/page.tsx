@@ -168,7 +168,59 @@ export default function CustomerDetailPage() {
           <WebhookPanel
             jiraUrl={customer.webhookJiraUrl}
             freshserviceUrl={customer.webhookFreshserviceUrl}
+            sharedFsUrl={
+              customer.webhookFreshserviceUrl
+                ? customer.webhookFreshserviceUrl.replace(/\/webhook\/freshservice\/[^/]+$/, '/webhook/freshservice-shared')
+                : undefined
+            }
           />
+
+          {/* Active routing key badge */}
+          {(customer.freshserviceCustomerId || customer.freshserviceCompanyId || customer.freshserviceGroupId || customer.freshserviceRoutingTag) && (
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-4">
+              <h3 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-3">
+                Shared FS Routing Keys
+              </h3>
+              <div className="space-y-2">
+                {customer.freshserviceCustomerId && (
+                  <div className="flex items-center justify-between text-xs">
+                    <div>
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/15 text-emerald-400 mr-2">P1</span>
+                      <span className="text-[var(--muted)]">Subject Key</span>
+                    </div>
+                    <code className="font-mono text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded">[{customer.freshserviceCustomerId}]</code>
+                  </div>
+                )}
+                {customer.freshserviceCompanyId && (
+                  <div className="flex items-center justify-between text-xs">
+                    <div>
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-500/15 text-blue-400 mr-2">P2</span>
+                      <span className="text-[var(--muted)]">Company ID</span>
+                    </div>
+                    <code className="font-mono text-blue-300 bg-blue-500/10 px-2 py-0.5 rounded">{customer.freshserviceCompanyId}</code>
+                  </div>
+                )}
+                {customer.freshserviceGroupId && (
+                  <div className="flex items-center justify-between text-xs">
+                    <div>
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/15 text-purple-400 mr-2">P3</span>
+                      <span className="text-[var(--muted)]">Group ID</span>
+                    </div>
+                    <code className="font-mono text-purple-300 bg-purple-500/10 px-2 py-0.5 rounded">{customer.freshserviceGroupId}</code>
+                  </div>
+                )}
+                {customer.freshserviceRoutingTag && (
+                  <div className="flex items-center justify-between text-xs">
+                    <div>
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/15 text-amber-400 mr-2">P4</span>
+                      <span className="text-[var(--muted)]">Tag</span>
+                    </div>
+                    <code className="font-mono text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded">{customer.freshserviceRoutingTag}</code>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* FS ↔ FS Pair Panel */}
           <FsPairPanel

@@ -31,6 +31,15 @@ export interface Customer {
   webhookJiraUrl: string;
   webhookFreshserviceUrl: string;
   webhookFsPairUrl?: string;
+  sharedFsDispatcherUrl?: string; // Static URL — same for all customers
+
+  // Shared FS Dispatcher routing
+  freshserviceCompanyId?: string;
+  freshserviceGroupId?: string;
+  freshserviceRoutingTag?: string;
+
+  // Subject-based routing key (highest priority)
+  freshserviceCustomerId?: string;
 
   createdAt: string;
   updatedAt: string;
@@ -45,6 +54,8 @@ export interface SyncLog {
   jiraIssueKey?: string;
   freshserviceTicketId?: number;
   status: 'success' | 'failed' | 'skipped';
+  errorMessage?: string;
+  errorCode?: string;
   createdAt: string;
 }
 
@@ -120,6 +131,10 @@ export interface CreateCustomerPayload {
   fs2BaseUrl?: string;
   fs2ApiKey?: string;
   fs2FallbackEmail?: string;
+  // Shared FS Dispatcher routing
+  freshserviceCompanyId?: string;
+  freshserviceGroupId?: string;
+  freshserviceRoutingTag?: string;
 }
 
 /** A single FS↔FS mirrored ticket pair */

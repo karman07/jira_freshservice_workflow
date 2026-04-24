@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import type { Customer, CreateCustomerPayload } from '@/lib/types';
 import { slugify } from '@/lib/utils';
-import { Eye, EyeOff, ChevronDown, ChevronRight, Info, ArrowLeftRight, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Eye, EyeOff, ChevronDown, ChevronRight, Info, ArrowLeftRight, ToggleLeft, ToggleRight, Radio, Share2 } from 'lucide-react';
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner';
 
 interface CustomerFormProps {
@@ -108,6 +108,18 @@ export function CustomerForm({
   const [fs2ApiKey, setFs2ApiKey] = useState(initialData?.fs2ApiKey ?? '');
   const [fs2FallbackEmail, setFs2FallbackEmail] = useState(initialData?.fs2FallbackEmail ?? '');
 
+  // Shared FS Dispatcher routing
+  const [sharedFsExpanded, setSharedFsExpanded] = useState(
+    !!(initialData?.freshserviceCompanyId || initialData?.freshserviceGroupId || initialData?.freshserviceRoutingTag || initialData?.freshserviceCustomerId)
+  );
+  const [fsCompanyId, setFsCompanyId] = useState(initialData?.freshserviceCompanyId ?? '');
+  const [fsGroupId, setFsGroupId] = useState(initialData?.freshserviceGroupId ?? '');
+  const [fsRoutingTag, setFsRoutingTag] = useState(initialData?.freshserviceRoutingTag ?? '');
+  const [fsCustomerId, setFsCustomerId] = useState(initialData?.freshserviceCustomerId ?? '');
+
+  // Compute which routing method is active (priority order)
+  const activeRoutingMethod = fsCustomerId ? 'customerId' : fsCompanyId ? 'company' : fsGroupId ? 'group' : fsRoutingTag ? 'tag' : null;
+
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -156,6 +168,11 @@ export function CustomerForm({
         fs2BaseUrl: fs2BaseUrl || undefined,
         fs2ApiKey: fs2ApiKey || undefined,
         fs2FallbackEmail: fs2FallbackEmail || undefined,
+        // Shared FS Dispatcher routing
+        freshserviceCompanyId: fsCompanyId || undefined,
+        freshserviceGroupId: fsGroupId || undefined,
+        freshserviceRoutingTag: fsRoutingTag || undefined,
+        freshserviceCustomerId: fsCustomerId || undefined,
       });
     } finally {
       setLoading(false);
@@ -432,6 +449,145 @@ export function CustomerForm({
                 </Field>
               </>
             )}
+          </div>
+        )}
+      </section>
+
+      {/* ── Shared Freshservice Dispatcher Routing ── */}
+      <section>
+        <button
+          type="button"
+          onClick={() => setSharedFsExpanded((v) => !v)}
+          className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4 pb-2 border-b border-[var(--border)] w-full hover:text-[var(--text)] transition-colors"
+        >
+          {sharedFsExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          <Share2 className="w-3.5 h-3.5" />
+          Shared FS Routing
+          <span className="ml-1 text-[var(--muted)] text-[10px] normal-case font-normal">
+            {activeRoutingMethod === 'customerId' && <span className="text-emerald-400 font-semibold">Customer ID active ✓</span>}
+            {activeRoutingMethod === 'company' && <span className="text-blue-400 font-semibold">Company ID active</span>}
+            {activeRoutingMethod === 'group' && <span className="text-purple-400 font-semibold">Group ID active</span>}
+            {activeRoutingMethod === 'tag' && <span className="text-amber-400 font-semibold">Tag routing active</span>}
+            {!activeRoutingMethod && 'Optional'}
+          </span>
+        </button>
+
+        {sharedFsExpanded && (
+          <div className="space-y-4">
+            {/* Explanation banner */}
+            <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
+              <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
+              <div className="space-y-1">
+                <p className="text-xs text-blue-300 leading-relaxed font-medium">Single Freshservice → Multi-Customer Routing</p>
+                <p className="text-xs text-blue-300/70 leading-relaxed">
+                  When using one shared Freshservice account, tickets are routed to this customer exclusively.
+                  Priority: <span className="text-blue-300 font-mono">Customer ID</span> &gt; <span className="text-blue-300 font-mono">Company ID</span> &gt; <span className="text-blue-300 font-mono">Group ID</span> &gt; <span className="text-blue-300 font-mono">Tag</span>.
+                  The <span className="text-blue-300 font-mono">Customer ID</span> method works by embedding <span className="text-blue-200 font-mono">[CUST-ID]</span> at the start of the ticket subject.
+                </p>
+              </div>
+            </div>
+
+            {/* Routing priority badge */}
+            {activeRoutingMethod && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl border"
+                style={{
+                  background:
+                    activeRoutingMethod === 'customerId' ? 'rgba(16,185,129,0.06)'
+                    : activeRoutingMethod === 'company' ? 'rgba(59,130,246,0.06)'
+                    : activeRoutingMethod === 'group' ? 'rgba(168,85,247,0.06)'
+                    : 'rgba(245,158,11,0.06)',
+                  borderColor:
+                    activeRoutingMethod === 'customerId' ? 'rgba(16,185,129,0.25)'
+                    : activeRoutingMethod === 'company' ? 'rgba(59,130,246,0.25)'
+                    : activeRoutingMethod === 'group' ? 'rgba(168,85,247,0.25)'
+                    : 'rgba(245,158,11,0.25)',
+                }}
+              >
+                <Radio className="w-3.5 h-3.5" style={{ color:
+                  activeRoutingMethod === 'customerId' ? '#34d399'
+                  : activeRoutingMethod === 'company' ? '#60a5fa'
+                  : activeRoutingMethod === 'group' ? '#c084fc'
+                  : '#fbbf24'
+                }} />
+                <p className="text-xs" style={{ color:
+                  activeRoutingMethod === 'customerId' ? '#34d399'
+                  : activeRoutingMethod === 'company' ? '#60a5fa'
+                  : activeRoutingMethod === 'group' ? '#c084fc'
+                  : '#fbbf24'
+                }}>
+                  Active routing: <span className="font-semibold font-mono">
+                    {activeRoutingMethod === 'customerId' && `[${fsCustomerId}] in subject`}
+                    {activeRoutingMethod === 'company' && `company_id = ${fsCompanyId}`}
+                    {activeRoutingMethod === 'group' && `group_id = ${fsGroupId}`}
+                    {activeRoutingMethod === 'tag' && `tag = "${fsRoutingTag}"`}
+                  </span>
+                </p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4">
+              {/* ★ Customer ID — highest priority */}
+              <Field
+                label="Customer ID (Subject Key)"
+                hint='Highest priority router. Set e.g. "dine3d" — when a ticket subject starts with [dine3d], the system extracts it, strips it from the subject, and routes the ticket exclusively to this customer.'
+              >
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)] font-mono text-sm select-none">[</span>
+                  <input
+                    type="text"
+                    value={fsCustomerId}
+                    onChange={(e) => setFsCustomerId(e.target.value.replace(/[\[\]\s]/g, ''))}
+                    placeholder="dine3d"
+                    className={`${inputCls('fsCustomerId')} font-mono px-7`}
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] font-mono text-sm select-none">]</span>
+                </div>
+                {fsCustomerId && (
+                  <p className="text-[10px] text-emerald-400 mt-1 font-mono">
+                    Ticket subject format: <span className="bg-emerald-500/10 px-1.5 py-0.5 rounded">[{fsCustomerId}] Your ticket subject here</span>
+                  </p>
+                )}
+              </Field>
+
+              <Field
+                label="Freshservice Company ID"
+                hint="Fallback router. Tickets where ticket.company_id matches this value go exclusively to this customer."
+              >
+                <input
+                  type="text"
+                  value={fsCompanyId}
+                  onChange={(e) => setFsCompanyId(e.target.value)}
+                  placeholder="e.g. 42"
+                  className={`${inputCls('fsCompanyId')} font-mono`}
+                />
+              </Field>
+
+              <Field
+                label="Freshservice Group ID"
+                hint="Fallback router (if no company ID set). Route tickets assigned to this group_id to this customer."
+              >
+                <input
+                  type="text"
+                  value={fsGroupId}
+                  onChange={(e) => setFsGroupId(e.target.value)}
+                  placeholder="e.g. 5001"
+                  className={`${inputCls('fsGroupId')} font-mono`}
+                />
+              </Field>
+
+              <Field
+                label="Routing Tag"
+                hint='Last-resort router. If a ticket contains this tag, route it to this customer. Example: "acme-corp"'
+              >
+                <input
+                  type="text"
+                  value={fsRoutingTag}
+                  onChange={(e) => setFsRoutingTag(e.target.value)}
+                  placeholder="e.g. acme-corp"
+                  className={inputCls('fsRoutingTag')}
+                />
+              </Field>
+            </div>
           </div>
         )}
       </section>
