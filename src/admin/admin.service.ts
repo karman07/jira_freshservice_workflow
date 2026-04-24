@@ -107,9 +107,34 @@ export class AdminService implements OnModuleInit {
   }
 
   async updateCustomer(slug: string, dto: UpdateCustomerDto): Promise<CustomerDocument> {
-    const c = await this.customerModel.findOneAndUpdate({ slug }, { $set: dto }, { new: true }).lean();
+    // Split the DTO into fields to $set (non-empty) and fields to $unset (empty strings).
+    // Sparse-unique fields (e.g. freshserviceCustomerId) must be REMOVED from the document
+    // when cleared; setting them to "" would cause a duplicate key error across customers.
+    const setPayload: Record<string, any> = {};
+    const unsetPayload: Record<string, 1> = {};
+
+    for (const [key, value] of Object.entries(dto)) {
+      if (value === '' || value === null || value === undefined) {
+        unsetPayload[key] = 1;
+      } else {
+        setPayload[key] = value;
+      }
+    }
+
+    const updateOp: Record<string, any> = {};
+    if (Object.keys(setPayload).length > 0)   updateOp['$set']   = setPayload;
+    if (Object.keys(unsetPayload).length > 0) updateOp['$unset'] = unsetPayload;
+
+    if (Object.keys(updateOp).length === 0) {
+      // Nothing to update — just return the existing document
+      const existing = await this.customerModel.findOne({ slug }).lean();
+      if (!existing) throw new NotFoundException(`Customer "${slug}" not found`);
+      return existing;
+    }
+
+    const c = await this.customerModel.findOneAndUpdate({ slug }, updateOp, { new: true }).lean();
     if (!c) throw new NotFoundException(`Customer "${slug}" not found`);
-    this.logger.log(`🔄 [Admin] Customer updated: "${slug}"`);
+    this.logger.log(`🔄 [Admin] Customer updated: "${slug}" (set=${JSON.stringify(Object.keys(setPayload))} unset=${JSON.stringify(Object.keys(unsetPayload))})`);
     return c;
   }
 

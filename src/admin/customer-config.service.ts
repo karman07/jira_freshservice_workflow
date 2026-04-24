@@ -161,23 +161,35 @@ export class CustomerConfigService {
     const { companyId, groupId, tags } = opts;
     let customer: CustomerDocument | null = null;
 
-    // 0. Try subject-embedded customer ID (highest priority, e.g. "[CUST-42]" in subject)
+    // 0. Try subject-embedded customer ID (HIGHEST PRIORITY — e.g. "[dine3d] Ticket subject")
     if (opts.subjectCustomerId) {
       customer = await this.customerModel.findOne({
         freshserviceCustomerId: opts.subjectCustomerId,
         isActive: true,
       }).lean();
       if (customer) {
-        this.logger.log(`🏷️  [SharedFS] Routed via subject CustomerID "${opts.subjectCustomerId}" → "${customer.slug}"`);
+        this.logger.log(
+          `🏷️  [SharedFS] ✅ Routed via subject CustomerID "${opts.subjectCustomerId}" → "${customer.slug}"`,
+        );
+        // Highest priority matched — skip all other resolution strategies
+        return this.buildConfig(customer);
+      } else {
+        this.logger.warn(
+          `⚠️  [SharedFS] Subject CustomerID "${opts.subjectCustomerId}" found in subject but NO active customer matched. ` +
+          `Falling through to companyId/groupId/tag lookup.`,
+        );
       }
     }
 
-    // 1. Try company_id first
-    if (companyId != null) {
+    // 1. Try company_id
+    if (!customer && companyId != null) {
       customer = await this.customerModel.findOne({
         freshserviceCompanyId: String(companyId),
         isActive: true,
       }).lean();
+      if (customer) {
+        this.logger.log(`🏷️  [SharedFS] Routed via companyId "${companyId}" → "${customer.slug}"`);
+      }
     }
 
     // 2. Try group_id
@@ -186,6 +198,9 @@ export class CustomerConfigService {
         freshserviceGroupId: String(groupId),
         isActive: true,
       }).lean();
+      if (customer) {
+        this.logger.log(`🏷️  [SharedFS] Routed via groupId "${groupId}" → "${customer.slug}"`);
+      }
     }
 
     // 3. Try routing tags
@@ -194,11 +209,14 @@ export class CustomerConfigService {
         freshserviceRoutingTag: { $in: tags },
         isActive: true,
       }).lean();
+      if (customer) {
+        this.logger.log(`🏷️  [SharedFS] Routed via tag match → "${customer.slug}"`);
+      }
     }
 
     if (!customer) {
       this.logger.warn(
-        `⚠️  [SharedFS] No customer matched. companyId=${companyId} groupId=${groupId} tags=${tags?.join(',')}`,
+        `⚠️  [SharedFS] No customer matched. subjectCustId=${opts.subjectCustomerId} companyId=${companyId} groupId=${groupId} tags=${tags?.join(',')}`,
       );
       return null;
     }

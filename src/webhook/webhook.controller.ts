@@ -152,37 +152,125 @@ export class WebhookController {
       return { received: true, status: 'ignored', reason: 'empty payload' };
     }
 
-    if (typeof payload === 'object') {
-      payload = this.rescueMalformedPayload(payload, req.rawBody);
+    // ── STEP 1: Extract customer ID from raw body string FIRST ─────────────
+    // We grep the raw body directly for the "subject" field and URL-decode it.
+    // This works regardless of how Express parsed the body (JSON, form, etc.)
+    // and bypasses all rescue/parsing complexity for the routing decision.
+    let subjectCustomerId: string | undefined;
+    let cleanedSubject = '';
+
+    const rawBodyStr = req.rawBody ?? '';
+    // Match "subject":"..." in the raw body (handles JSON with URL-encoded values)
+    const rawSubjectMatch = rawBodyStr.match(/"subject"\s*:\s*"([^"]+)"/);
+    if (rawSubjectMatch) {
+      let subjectVal = rawSubjectMatch[1];
+      // URL-decode (handles %20, %5B etc. inside the JSON string value)
+      try { subjectVal = decodeURIComponent(subjectVal.replace(/\+/g, ' ')); } catch (_) {}
+
+      this.logger.log(`🔍 [FS-SHARED] Raw subject extracted: "${subjectVal}"`);
+
+      const custMatch = subjectVal.match(/^\[([^\]]+)\]\s*/);
+      if (custMatch) {
+        subjectCustomerId = custMatch[1];
+        cleanedSubject    = subjectVal.replace(/^\[[^\]]+\]\s*/, '').trim();
+        this.logger.log(`🏷️  [FS-SHARED] Customer ID from subject: "${subjectCustomerId}" | Cleaned subject: "${cleanedSubject}"`);
+      } else {
+        cleanedSubject = subjectVal;
+      }
     }
 
-    // Extract routing identifiers from the ticket
-    const ticket = payload?.ticket ?? {};
-    const rawSubject: string = ticket.subject ?? ticket.name ?? payload?.subject ?? '';
-    const companyId  = ticket.company_id  ?? payload?.company_id;
-    const groupId    = ticket.group_id    ?? payload?.group_id;
-    const tags: string[] = ticket.tags    ?? payload?.tags ?? [];
-    const rawTicketId = ticket.id ?? payload?.ticket_id ?? 'n/a';
+    // ── STEP 2: Build a clean payload for downstream processing ────────────
+    // Freshservice sends two kinds of "broken" payloads:
+    //   ticket_created  → valid JSON with URL-encoded field VALUES
+    //   ticket_updated  → INVALID JSON with unquoted values:
+    //                     "id": INC-372,  "priority": Low,  "status": Open
+    // Strategy (tries in order):
+    //   1. JSON.parse(rawBodyStr)        — valid JSON, URL-encoded values
+    //   2. JSON.parse(sanitized)         — invalid JSON with unquoted values fixed
+    //   3. JSON.parse(decoded)           — rare payload=... wrapped case
+    //   4. Regex-extract key fields      — last resort, build minimal payload
+    let finalPayload: any = payload; // default: what Express parsed
 
-    // ── Subject-based Customer ID extraction ───────────────────
-    // Pattern: "[CUST-42] Ticket subject" or "[dine3d] Ticket subject"
-    const subjectCustMatch = rawSubject.match(/^\[([^\]]+)\]\s*/);
-    const subjectCustomerId = subjectCustMatch ? subjectCustMatch[1] : undefined;
-    const cleanedSubject = subjectCustomerId
-      ? rawSubject.replace(/^\[[^\]]+\]\s*/, '').trim()
-      : rawSubject;
-
-    // Mutate payload to use the cleaned subject for downstream processing
-    if (subjectCustomerId && cleanedSubject && ticket.subject) {
-      payload = {
-        ...payload,
-        ticket: { ...ticket, subject: cleanedSubject },
-      };
+    if (rawBodyStr) {
+      // Try 1: parse raw body as-is (valid JSON with URL-encoded values)
+      try {
+        const parsed = JSON.parse(rawBodyStr);
+        if (parsed?.event_type || parsed?.ticket || parsed?.freshdesk_webhook) {
+          finalPayload = parsed;
+          this.logger.log('✅ [FS-SHARED] Parsed raw body as JSON directly');
+        }
+      } catch (_) {
+        // Try 2: sanitize unquoted string values then parse
+        // Fixes: "priority": Low,  "status": Open,  "id": INC-372,
+        try {
+          const sanitized = rawBodyStr
+            .replace(/:\s*([A-Za-z][A-Za-z0-9_\-]*)\s*([,}\]\r\n])/g, ': "$1"$2')
+            .replace(/:\s*([A-Za-z][A-Za-z0-9_\-]*)\s*$/gm, ': "$1"');
+          const parsed = JSON.parse(sanitized);
+          if (parsed?.event_type || parsed?.ticket || parsed?.freshdesk_webhook) {
+            finalPayload = parsed;
+            this.logger.log('✅ [FS-SHARED] Parsed sanitized JSON body (unquoted values fixed)');
+          }
+        } catch (_) {
+          // Try 3: payload=... wrapped body
+          try {
+            let decoded = rawBodyStr;
+            if (decoded.startsWith('payload=')) {
+              decoded = decodeURIComponent(decoded.slice('payload='.length));
+            }
+            const parsed = JSON.parse(decoded);
+            if (parsed?.event_type || parsed?.ticket || parsed?.freshdesk_webhook) {
+              finalPayload = parsed;
+              this.logger.log('✅ [FS-SHARED] Parsed payload= wrapped body as JSON');
+            }
+          } catch (_) {
+            // Try 4: regex-extract key fields directly from raw body string
+            // This handles completely broken payloads as a last resort
+            const evtMatch  = rawBodyStr.match(/"event_type"\s*:\s*"([^"]+)"/);
+            const idMatch   = rawBodyStr.match(/"id"\s*:\s*"?([A-Za-z0-9_\-]+)"?/);
+            const subjMatch = rawBodyStr.match(/"subject"\s*:\s*"([^"]+)"/);
+            const priMatch  = rawBodyStr.match(/"priority"\s*:\s*"?([A-Za-z0-9]+)"?/);
+            const stMatch   = rawBodyStr.match(/"status"\s*:\s*"?([A-Za-z0-9]+)"?/);
+            const descMatch = rawBodyStr.match(/"description_text"\s*:\s*"([^"]+)"/);
+            if (evtMatch || idMatch) {
+              finalPayload = {
+                event_type: evtMatch?.[1],
+                ticket: {
+                  id:               idMatch?.[1],
+                  subject:          subjMatch?.[1] ?? '',
+                  priority:         priMatch?.[1],
+                  status:           stMatch?.[1],
+                  description_text: descMatch?.[1] ?? '',
+                },
+              };
+              this.logger.log(`✅ [FS-SHARED] Regex-extracted payload fallback: event=${evtMatch?.[1]} id=${idMatch?.[1]}`);
+            } else {
+              this.logger.debug('ℹ️  [FS-SHARED] All parse attempts failed — using Express payload as last resort');
+            }
+          }
+        }
+      }
     }
+
+    // URL-decode the string VALUES inside the already-parsed payload
+    // (converts "[dine3d]%20pls%20ignore" → "[dine3d] pls ignore", etc.)
+    finalPayload = this.decodePayloadValues(finalPayload);
+
+    // Patch the cleaned subject into the payload so downstream sees the stripped version
+    const ticket = finalPayload?.ticket ?? {};
+    if (subjectCustomerId) {
+      finalPayload = { ...finalPayload, ticket: { ...ticket, subject: cleanedSubject } };
+    }
+    const patchedTicket = finalPayload?.ticket ?? {};
+
+    const rawTicketId = patchedTicket.id ?? finalPayload?.ticket_id ?? finalPayload?.freshdesk_webhook?.ticket_id ?? 'n/a';
+    const companyId   = patchedTicket.company_id ?? finalPayload?.company_id;
+    const groupId     = patchedTicket.group_id   ?? finalPayload?.group_id;
+    const tags: string[] = patchedTicket.tags    ?? finalPayload?.tags ?? [];
 
     this.logger.log(
       `\n${'═'.repeat(60)}\n` +
-      `📥 [FS-SHARED] Ticket: ${rawTicketId} | Subject: "${rawSubject}"\n` +
+      `📥 [FS-SHARED] Ticket: ${rawTicketId} | Subject: "${cleanedSubject || patchedTicket.subject || '(none)'}"\n` +
       `   SubjectCustId: ${subjectCustomerId ?? 'none'} | CompanyId: ${companyId ?? 'none'} | GroupId: ${groupId ?? 'none'} | Tags: [${tags.join(', ')}]\n` +
       `${'═'.repeat(60)}`,
     );
@@ -211,9 +299,13 @@ export class WebhookController {
     this.logger.log(
       `🎯 [FS-SHARED] Ticket #${rawTicketId} → Customer "${customerConfig.slug}" (isolated routing)`,
     );
+    this.logger.log(
+      `🚀 [FS-SHARED] Forwarding to SyncService → Jira [${customerConfig.jiraProjectKey}] | ` +
+      `event="${finalPayload?.event_type}" ticket="${patchedTicket.id ?? rawTicketId}" subject="${cleanedSubject || patchedTicket.subject}"`,
+    );
 
     try {
-      const result = await this.syncService.handleFreshserviceEvent(payload, customerConfig);
+      const result = await this.syncService.handleFreshserviceEvent(finalPayload, customerConfig);
       await this.customerConfigService.recordSyncResult(customerConfig.slug, result.status === 'success');
       this.logger.log(`📤 [FS-SHARED][${customerConfig.slug}] Done — ${result.status} | ${result.message}`);
       return { received: true, customer: customerConfig.slug, routedVia: { subjectCustomerId, companyId, groupId, tags }, cleanedSubject, ...result };
@@ -384,36 +476,37 @@ export class WebhookController {
   private rescueMalformedPayload(payload: any, rawBody?: string): any {
     if (!payload || typeof payload !== 'object') return payload;
 
-    if (payload.event_type || payload.freshdesk_webhook) return payload;
+    // Already has a top-level event_type — payload was parsed correctly by Express.
+    // Still run through to URL-decode any encoded field values inside.
+    if (payload.event_type || payload.freshdesk_webhook) {
+      return this.decodePayloadValues(payload);
+    }
 
     try {
       let rawStr = '';
 
       if (rawBody && rawBody.trim() !== '') {
         rawStr = rawBody.trim();
+
+        // Step 1: URL-decode the raw body (handles form-urlencoded wrapper)
         if (rawStr.includes('%') || rawStr.includes('+')) {
-          try {
-            rawStr = decodeURIComponent(rawStr.replace(/\+/g, ' '));
-          } catch (e) {
-            // ignore decode error
-          }
+          try { rawStr = decodeURIComponent(rawStr.replace(/\+/g, ' ')); } catch (_) {}
         }
+
+        // Step 2: strip leading "payload=" if Freshservice wrapped it
         if (rawStr.startsWith('payload=')) {
           rawStr = rawStr.replace(/^payload=/, '');
-        } else if (rawStr.endsWith('=')) {
+        } else if (rawStr.endsWith('=') && !rawStr.includes(':')) {
           rawStr = rawStr.slice(0, -1);
         }
       } else {
+        // Reconstruct raw string from Express's half-parsed object
         const reconstruct = (obj: any): string => {
           let str = '';
-          const entries = Object.entries(obj);
-          for (const [key, value] of entries) {
+          for (const [key, value] of Object.entries(obj)) {
             str += key;
-            if (value && typeof value === 'object') {
-              str += reconstruct(value);
-            } else if (typeof value === 'string' && value !== '') {
-              str += value;
-            }
+            if (value && typeof value === 'object') str += reconstruct(value);
+            else if (typeof value === 'string' && value !== '') str += value;
           }
           return str;
         };
@@ -424,32 +517,63 @@ export class WebhookController {
 
       if (!rawStr.startsWith('{')) return payload;
 
-      rawStr = rawStr.replace(/:\s*([a-zA-Z][a-zA-Z0-9_\-\s]*?)\s*([,}])/g, ': "$1"$2');
-      rawStr = rawStr.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+      // ── STEP A: Try clean JSON.parse FIRST (before any regex mangling) ──────
+      // This handles the common case where Freshservice sends a fully valid JSON
+      // body but wrapped in URL-encoding at the transport layer. The regexes
+      // below corrupt HTML in description_text — avoid them if unnecessary.
+      try {
+        const cleanParsed = JSON.parse(rawStr);
+        if (cleanParsed && (cleanParsed.event_type || cleanParsed.ticket || cleanParsed.freshdesk_webhook)) {
+          this.logger.log('🩹 [RESCUE] Clean JSON.parse succeeded — returning decoded payload');
+          return this.decodePayloadValues(cleanParsed);
+        }
+      } catch (_) {
+        // Not valid JSON as-is — fall through to regex rescue
+      }
+
+      // ── STEP B: Regex rescue for genuinely malformed payloads ────────────────
+      let mangled = rawStr;
+      mangled = mangled.replace(/:\s*([a-zA-Z][a-zA-Z0-9_\-\s]*?)\s*([,}])/g, ': "$1"$2');
+      mangled = mangled.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
 
       let attempts = 0;
-      let finalParsed = null;
-      let currentStr = rawStr;
-
+      let finalParsed: any = null;
+      let currentStr = mangled;
       while (attempts < 5) {
-        try {
-          finalParsed = JSON.parse(currentStr);
-          break;
-        } catch (e) {
-          currentStr += '}';
-          attempts++;
-        }
+        try { finalParsed = JSON.parse(currentStr); break; }
+        catch (_) { currentStr += '}'; attempts++; }
       }
 
       if (finalParsed) {
-        this.logger.log('🩹 [RESCUE] Successfully reassembled and parsed broken JSON payload');
-        return finalParsed;
+        this.logger.log('🩹 [RESCUE] Regex-rescued and parsed broken JSON payload');
+        return this.decodePayloadValues(finalParsed);
       }
 
       return payload;
-
-    } catch (err) {
+    } catch (_) {
       return payload;
     }
+  }
+
+  /**
+   * Recursively URL-decode all string values inside a parsed payload object.
+   * Freshservice sometimes sends JSON with URL-encoded field values
+   * (e.g. subject: "[dine3d]%20final%20test%20ticket").
+   */
+  private decodePayloadValues(obj: any): any {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map((v) => this.decodePayloadValues(v));
+    const result: Record<string, any> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value === 'string') {
+        try { result[key] = decodeURIComponent(value.replace(/\+/g, ' ')); }
+        catch (_) { result[key] = value; }
+      } else if (value && typeof value === 'object') {
+        result[key] = this.decodePayloadValues(value);
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
   }
 }

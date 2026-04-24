@@ -99,25 +99,33 @@ export class FreshserviceClassifierService {
         rawPayload?.subject ??
         'No Subject';
 
-      const description =
+      // Strip HTML tags — description_text comes as HTML from Freshservice
+      const rawDescription =
         ticket?.description_text ??
         ticket?.description ??
         fw?.ticket_description ??
         rawPayload?.description ??
-        'No description.';
+        '';
+      const description = this.stripHtml(rawDescription) || 'No description.';
 
-      const fsPriority = Number(
-        ticket?.priority ?? 
-        fw?.ticket_priority ?? 
-        rawPayload?.priority ?? 
-        2
-      );
+      const priorityRaw = ticket?.priority ?? fw?.ticket_priority ?? rawPayload?.priority ?? 2;
+      let fsPriority = Number(priorityRaw);
+      if (isNaN(fsPriority) && typeof priorityRaw === 'string') {
+        const pMap: any = { low: 1, medium: 2, high: 3, urgent: 4 };
+        fsPriority = pMap[priorityRaw.toLowerCase().trim()] ?? 2;
+      }
+      if (isNaN(fsPriority)) fsPriority = 2;
 
-      const fsStatus = Number(
-        ticket?.status ?? 
-        fw?.ticket_status ?? 
-        rawPayload?.status ?? 
-        2
+      const statusRaw = ticket?.status ?? fw?.ticket_status ?? rawPayload?.status ?? 2;
+      let fsStatus = Number(statusRaw);
+      if (isNaN(fsStatus) && typeof statusRaw === 'string') {
+        const sMap: any = { open: 2, pending: 3, resolved: 4, closed: 5 };
+        fsStatus = sMap[statusRaw.toLowerCase().trim()] ?? 2;
+      }
+      if (isNaN(fsStatus)) fsStatus = 2;
+
+      this.logger.log(
+        `🎫 [CLASSIFIER] ticket_created → CREATE event | subject="${subject}" priority=${fsPriority} status=${fsStatus} ticketId=${ticketId}`,
       );
 
       return { type: 'create', ticketId, subject, description, fsPriority, fsStatus };
